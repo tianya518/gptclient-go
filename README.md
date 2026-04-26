@@ -90,7 +90,7 @@ go run ./cmd/chat/ -temp
 ```
 gpt-4o
 gpt-4o-mini
-gpt-5-4-thinking
+gpt-5-5-thinking
 o4-mini-high
 ```
 
