@@ -6,10 +6,25 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	sentinel "sentinel-go"
 )
+
+var accessTokenRe = regexp.MustCompile(`"accessToken"\s*:\s*"([^"]+)"`)
+
+// extractToken 从原始字符串中提取 Bearer Token。
+// 支持两种格式：
+//  1. 直接粘贴 chatgpt.com/api/auth/session 的完整 JSON → 自动提取 accessToken
+//  2. 直接粘贴 JWT 字符串 → 原样返回
+func extractToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if m := accessTokenRe.FindStringSubmatch(raw); len(m) == 2 {
+		return m[1]
+	}
+	return raw
+}
 
 type configFile struct {
 	BearerToken  string `json:"bearerToken"`
@@ -34,13 +49,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cf.BearerToken == "" || cf.BearerToken == "REPLACE_WITH_JWT" {
+	token := extractToken(cf.BearerToken)
+	if token == "" || token == "REPLACE_WITH_JWT" {
 		fmt.Fprintln(os.Stderr, "未配置凭证，请编辑 config.json")
 		os.Exit(1)
 	}
 
 	client := sentinel.NewClient(sentinel.Config{
-		BearerToken:  cf.BearerToken,
+		BearerToken:  token,
 		CookieString: cf.CookieString,
 		Model:        *model,
 		TempMode:     *temp,
@@ -50,7 +66,7 @@ func main() {
 	if len(args) > 0 {
 		userMsg := strings.Join(args, " ")
 		fmt.Printf("\nYou: %s\n\nChatGPT:\n\n", userMsg)
-		_, err := client.ChatStream(userMsg, func(delta string) {
+		_, err := client.ChatStream(sentinel.ChatOptions{Text: userMsg}, func(delta string) {
 			fmt.Print(delta)
 		})
 		if err != nil {
@@ -127,7 +143,7 @@ func startRepl(client *sentinel.Client) {
 
 		default:
 			fmt.Print("\nChatGPT:\n\n")
-			_, err := client.ChatStream(input, func(delta string) {
+			_, err := client.ChatStream(sentinel.ChatOptions{Text: input}, func(delta string) {
 				fmt.Print(delta)
 			})
 			if err != nil {

@@ -1,5 +1,6 @@
 # 凭证配置（含 Bearer Token，绝不能提交）
 config.json
+tokens.txt
 
 # DALL-E 图片下载目录
 images/

@@ -3,7 +3,6 @@ package sentinel
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"time"
 )
 
@@ -68,15 +67,10 @@ func (c *Client) getConduitToken(model, turnTraceID, partialText string) (string
 
 // getSentinelToken 获取 sentinel token（Step 2+3：prepare → PoW → finalize）
 func (c *Client) getSentinelToken() (sentinelToken, proofToken string, err error) {
-	sid := GenerateUUID()
-	t0 := time.Now().UnixMilli()
-
-	cfg := buildCfg(c.userAgent, c.buildHash, c.language, sid, t0, perfNowMs(c.startTime))
-	cfg[3] = 1
-	cfg[9] = 0.5
+	reqToken := NewPOWConfig(c.userAgent).RequirementsToken()
 
 	prepBody := map[string]string{
-		"p": "gAAAAAC" + encodeBase64JSON(cfg),
+		"p": reqToken,
 	}
 
 	resp, err := c.httpClient.R().
@@ -120,19 +114,8 @@ func (c *Client) getSentinelToken() (sentinelToken, proofToken string, err error
 		difficulty := pd.Proofofwork.Difficulty
 		s0 := time.Now()
 
-		for r := 0; r < 500000; r++ {
-			elapsed := math.Round(float64(time.Since(s0).Microseconds()) / 1000.0)
-			cc := buildCfg(c.userAgent, c.buildHash, c.language, sid, t0, perfNowMs(c.startTime))
-			cc[3] = r
-			cc[9] = elapsed
-			a := encodeBase64JSON(cc)
-			hash := fnvHash(seed + a)
-			if len(hash) >= len(difficulty) && hash[:len(difficulty)] <= difficulty {
-				proofToken = "gAAAAAB" + a + "~S"
-				c.logf("  [pow] r=%d, %dms", r, time.Since(s0).Milliseconds())
-				break
-			}
-		}
+		proofToken = SolveProofToken(seed, difficulty, c.userAgent)
+		c.logf("  [pow] solved in %dms", time.Since(s0).Milliseconds())
 	}
 
 	fb := map[string]interface{}{

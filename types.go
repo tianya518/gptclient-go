@@ -22,6 +22,7 @@ type ChatResult struct {
 	ImageTaskID        string // DALL-E 图片任务触发标志（如有）
 	ImageFileID        string // 图片文件 ID（从 asset_pointer 提取，如 file_xxx）
 	ImagePath          string // 已下载图片本地路径（如有）
+	DalleStarted       bool   // 标记是否已输出正在画图的提示
 }
 
 // SessionInfo 当前会话状态快照

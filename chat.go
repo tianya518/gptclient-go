@@ -14,17 +14,24 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ChatOptions 对话请求参数
+type ChatOptions struct {
+	Text           string
+	Images         []UploadedFile
+	ForcePictureV2 bool
+}
+
 // Chat 发送一轮对话，返回完整结果（非流式）
-func (c *Client) Chat(userMsg string) (*ChatResult, error) {
-	return c.ChatStream(userMsg, nil)
+func (c *Client) Chat(opts ChatOptions) (*ChatResult, error) {
+	return c.ChatStream(opts, nil)
 }
 
 // ChatStream 发送一轮对话，通过 handler 回调实时接收增量文本
-func (c *Client) ChatStream(userMsg string, handler StreamHandler) (*ChatResult, error) {
+func (c *Client) ChatStream(opts ChatOptions, handler StreamHandler) (*ChatResult, error) {
 	turnTraceID := GenerateUUID()
 
 	c.logf("[step 1] 获取 conduit token...")
-	conduitToken, err := c.getConduitToken(c.model, turnTraceID, runeSlice(userMsg, 5))
+	conduitToken, err := c.getConduitToken(c.model, turnTraceID, runeSlice(opts.Text, 5))
 	if err != nil {
 		return nil, fmt.Errorf("get conduit token: %w", err)
 	}
@@ -42,26 +49,54 @@ func (c *Client) ChatStream(userMsg string, handler StreamHandler) (*ChatResult,
 	}
 	defer wsConn.Close()
 
+	var parts []interface{}
+	for _, img := range opts.Images {
+		parts = append(parts, img.ToAssetPointerPart())
+	}
+	parts = append(parts, opts.Text)
+
+	contentType := "text"
+	if len(opts.Images) > 0 {
+		contentType = "multimodal_text"
+	}
+
+	attachments := []Attachment{}
+	for _, img := range opts.Images {
+		attachments = append(attachments, img.ToAttachment())
+	}
+
 	msgID := GenerateUUID()
+	userMsgObj := map[string]interface{}{
+		"id":          msgID,
+		"author":      map[string]string{"role": "user"},
+		"create_time": float64(time.Now().UnixMilli()) / 1000.0,
+		"content": map[string]interface{}{
+			"content_type": contentType,
+			"parts":        parts,
+		},
+		"metadata": map[string]interface{}{
+			"developer_mode_connector_ids": []string{},
+			"selected_sources":             []string{},
+			"selected_github_repos":        []string{},
+			"selected_all_github_repos":    false,
+			"serialization_metadata":       map[string]interface{}{"custom_symbol_offsets": []interface{}{}},
+		},
+	}
+	if len(attachments) > 0 {
+		userMsgObj["metadata"].(map[string]interface{})["attachments"] = attachments
+	}
+
+	systemHints := []string{}
+	if opts.ForcePictureV2 {
+		systemHints = append(systemHints, "picture_v2")
+		// picture_v2 不能带 selected_sources，否则直接失败 (静默失败)
+		delete(userMsgObj["metadata"].(map[string]interface{}), "selected_sources")
+	}
+
 	body := map[string]interface{}{
 		"action": "next",
 		"messages": []map[string]interface{}{
-			{
-				"id":          msgID,
-				"author":      map[string]string{"role": "user"},
-				"create_time": float64(time.Now().UnixMilli()) / 1000.0,
-				"content": map[string]interface{}{
-					"content_type": "text",
-					"parts":        []string{userMsg},
-				},
-				"metadata": map[string]interface{}{
-					"developer_mode_connector_ids": []string{},
-					"selected_sources":             []string{},
-					"selected_github_repos":        []string{},
-					"selected_all_github_repos":    false,
-					"serialization_metadata":       map[string]interface{}{"custom_symbol_offsets": []interface{}{}},
-				},
-			},
+			userMsgObj,
 		},
 		"parent_message_id":        c.parentMessageID,
 		"model":                    c.model,
@@ -69,7 +104,7 @@ func (c *Client) ChatStream(userMsg string, handler StreamHandler) (*ChatResult,
 		"timezone":                 "Asia/Shanghai",
 		"conversation_mode":        map[string]string{"kind": "primary_assistant"},
 		"enable_message_followups": true,
-		"system_hints":             []string{},
+		"system_hints":             systemHints,
 		"supports_buffering":       true,
 		"supported_encodings":      []string{"v1"},
 		"client_contextual_info": map[string]interface{}{
@@ -113,19 +148,9 @@ func (c *Client) ChatStream(userMsg string, handler StreamHandler) (*ChatResult,
 	c.logf("[info] conversation_id=%s, turn=%d, reply=%d字",
 		c.conversationID, c.turnCount, len([]rune(result.Text)))
 
-	if !c.DisableAutoImage {
-		if result.ImageFileID != "" && result.ConversationID != "" {
-			// 从 WebSocket asset_pointer 直接拿到文件 ID，无需轮询
-			c.logf("[image] 直接下载图片: %s", result.ImageFileID)
-			imgPath, err := c.DownloadImageByFileID(result.ImageFileID, result.ConversationID)
-			if err != nil {
-				c.logf("[image] 下载失败: %v", err)
-			}
-			result.ImagePath = imgPath
-		} else if result.ImageTaskID != "" && result.ConversationID != "" {
-			// 回退：轮询对话详情找 asset_pointer
-			imgPath, _ := c.PollAndDownloadImage(result.ConversationID)
-			result.ImagePath = imgPath
+	if !c.DisableAutoImage && (result.ImageFileID == "" && result.DalleStarted) {
+		if fid, err := c.PollForImageFileID(result.ConversationID); err == nil {
+			result.ImageFileID = fid
 		}
 	}
 
@@ -267,6 +292,10 @@ func (c *Client) streamConversation(body interface{}, sentinelToken, proofToken,
 			continue
 		}
 
+		if strings.Contains(payload, "dalle") || strings.Contains(payload, `"tool"`) || strings.Contains(payload, "image") {
+			c.logf("[debug-sse] payload: %s", payload)
+		}
+
 		if cid, ok := evt["conversation_id"].(string); ok && cid != "" {
 			result.ConversationID = cid
 		}
@@ -390,6 +419,28 @@ func (c *Client) processConvUpdatePayload(payload map[string]interface{}, result
 		}
 
 		if role == "tool" {
+			name, _ := author["name"].(string)
+			status, _ := msg["status"].(string)
+
+			isImageTool := strings.Contains(name, "dalle") || strings.Contains(name, "image_gen")
+
+			if isImageTool && status == "in_progress" {
+				if handler != nil && !result.DalleStarted {
+					prompt := ""
+					for _, p := range parts {
+						if pStr, ok := p.(string); ok && pStr != "" {
+							prompt += pStr
+						}
+					}
+					if prompt != "" {
+						handler(fmt.Sprintf("\n\n[正在生成图片: %s...]\n\n", prompt))
+					} else {
+						handler("\n\n[正在生成图片，请稍候...]\n\n")
+					}
+					result.DalleStarted = true
+				}
+			}
+
 			for _, part := range parts {
 				partMap, ok := part.(map[string]interface{})
 				if !ok {

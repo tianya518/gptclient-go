@@ -2,8 +2,6 @@ package sentinel
 
 import (
 	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"time"
@@ -19,73 +17,11 @@ func GenerateUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// encodeBase64JSON 将值 JSON 序列化后 Base64 编码（对应 JS 的 O0 函数）
-func encodeBase64JSON(v interface{}) string {
-	data, _ := json.Marshal(v)
-	return base64.StdEncoding.EncodeToString(data)
-}
-
-// fnvHash 对应 JS 的 rEe 函数：FNV-1a 变体散列
-func fnvHash(s string) string {
-	var h uint32 = 2166136261
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	h ^= h >> 16
-	h *= 2246822507
-	h ^= h >> 13
-	h *= 3266489909
-	h ^= h >> 16
-	return fmt.Sprintf("%08x", h)
-}
-
-// buildCfg 构造指纹配置数组（对应 JS 的 buildCfg）
-func buildCfg(ua, buildHash, lang, sid string, t0 int64, perfNow float64) []interface{} {
-	return []interface{}{
-		3000,
-		jsDateString(time.Now()),
-		int64(4294967296),
-		nil,
-		ua,
-		"",
-		buildHash,
-		lang,
-		"zh-CN,en,en-GB,en-US",
-		nil,
-		"credentials\u2252[object Navigator]",
-		"location",
-		"fetch",
-		perfNow,
-		sid,
-		"",
-		28,
-		t0,
-		0, 0, 0, 0, 0, 0, 0,
-	}
-}
-
-// jsDateString 模拟 JavaScript Date.toString() 的输出格式
-func jsDateString(t time.Time) string {
-	days := [...]string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
-	months := [...]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-		"Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
-	name, offset := t.Zone()
-	sign := "+"
-	if offset < 0 {
-		sign = "-"
-		offset = -offset
-	}
-	h := offset / 3600
-	m := (offset % 3600) / 60
-	return fmt.Sprintf("%s %s %02d %d %02d:%02d:%02d GMT%s%02d%02d (%s)",
-		days[t.Weekday()], months[t.Month()-1], t.Day(), t.Year(),
-		t.Hour(), t.Minute(), t.Second(), sign, h, m, name)
-}
-
 func perfNowMs(start time.Time) float64 {
 	return float64(time.Since(start).Microseconds()) / 1000.0
 }
+
+
 
 func truncateStr(s string, maxLen int) string {
 	if len(s) <= maxLen {

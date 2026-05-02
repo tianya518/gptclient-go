@@ -1,0 +1,27 @@
+services:
+  sentinel-go:
+    build: .
+    container_name: sentinel-go
+    restart: unless-stopped
+    ports:
+      - "5005:5005"
+    environment:
+      # 服务端口
+      PORT: "5005"
+      # 调用 API 时的授权码（留空则直接用传入的 Bearer token 作为 ChatGPT token）
+      AUTHORIZATION: ""
+      # 默认模型
+      DEFAULT_MODEL: "gpt-5-5-thinking"
+      # 临时模式（不保存历史）
+      TEMP_MODE: "false"
+      # Session 超时（分钟）
+      SESSION_TTL_MINUTES: "120"
+    volumes:
+      # 持久化 tokens 和图片
+      - ./tokens.txt:/app/tokens.txt
+      - ./images:/app/images
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

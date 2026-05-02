@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sentinel-Go · 管理面板</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#08080f;--s1:#111119;--s2:#1a1a26;--border:rgba(255,255,255,0.07);--accent:#7c6fff;--green:#4ecb8b;--red:#ff5f6d;--yellow:#ffc76e;--text:#e0e0f0;--muted:#7878a0;--r:14px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+/* nav */
+nav{position:sticky;top:0;z-index:99;height:58px;padding:0 2rem;display:flex;align-items:center;justify-content:space-between;background:rgba(8,8,15,.85);backdrop-filter:blur(14px);border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.05rem}
+.logo{width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--red));display:flex;align-items:center;justify-content:center;font-size:.95rem}
+.nav-links{display:flex;gap:2px}
+.nav-links a{color:var(--muted);text-decoration:none;padding:6px 14px;border-radius:8px;font-size:.85rem;font-weight:500;transition:.2s}
+.nav-links a:hover,.nav-links a.active{color:var(--text);background:var(--s2)}
+/* layout */
+main{max-width:920px;margin:0 auto;padding:2rem}
+/* stat cards */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem}
+.stat{background:var(--s1);border:1px solid var(--border);border-radius:var(--r);padding:1.25rem;position:relative;overflow:hidden;transition:transform .2s}
+.stat:hover{transform:translateY(-2px)}
+.stat::after{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:var(--r) var(--r) 0 0}
+.stat.a::after{background:linear-gradient(90deg,var(--accent),transparent)}
+.stat.b::after{background:linear-gradient(90deg,var(--green),transparent)}
+.stat.c::after{background:linear-gradient(90deg,var(--red),transparent)}
+.stat.d::after{background:linear-gradient(90deg,var(--yellow),transparent)}
+.stat-label{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;font-weight:600}
+.stat-val{font-size:2rem;font-weight:700}
+/* card */
+.card{background:var(--s1);border:1px solid var(--border);border-radius:var(--r);margin-bottom:1.5rem;overflow:hidden}
+.card-head{padding:.9rem 1.4rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.card-title{font-size:.875rem;font-weight:600}
+.card-body{padding:1.4rem}
+/* form */
+textarea{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:9px;color:var(--text);font-family:'JetBrains Mono','Consolas',monospace;font-size:.78rem;padding:.75rem 1rem;resize:vertical;min-height:200px;outline:none;transition:border-color .2s;margin-bottom:1rem;line-height:1.6}
+textarea:focus{border-color:var(--accent)}
+textarea::placeholder{color:var(--muted)}
+.btn-row{display:flex;gap:.75rem;flex-wrap:wrap}
+.btn{padding:.575rem 1.2rem;border-radius:8px;border:none;font-size:.85rem;font-weight:500;cursor:pointer;transition:all .2s;font-family:inherit}
+.btn-p{background:var(--accent);color:#fff}.btn-p:hover{filter:brightness(1.18)}
+.btn-d{background:rgba(255,95,109,.12);color:var(--red);border:1px solid rgba(255,95,109,.2)}.btn-d:hover{background:rgba(255,95,109,.22)}
+.btn-g{background:var(--s2);color:var(--muted)}.btn-g:hover{color:var(--text)}
+/* api info */
+.api-box{background:var(--s2);border-radius:9px;padding:1rem 1.2rem;font-size:.82rem;color:var(--muted);line-height:1.8}
+.api-box code{color:var(--accent);font-family:monospace}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:600}
+.badge-ok{background:rgba(78,203,139,.12);color:var(--green)}
+.badge-err{background:rgba(255,95,109,.12);color:var(--red)}
+/* error token list */
+.err-list{max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+.err-item{font-family:monospace;font-size:.75rem;color:var(--red);padding:5px 10px;background:rgba(255,95,109,.06);border-radius:6px;word-break:break-all}
+.empty{color:var(--muted);font-size:.85rem;text-align:center;padding:2rem}
+/* toast */
+#toast{position:fixed;bottom:1.5rem;right:1.5rem;background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:.7rem 1.2rem;font-size:.85rem;transform:translateY(80px);opacity:0;transition:all .3s cubic-bezier(.34,1.56,.64,1);z-index:9999;max-width:320px}
+#toast.show{transform:translateY(0);opacity:1}
+@media(max-width:640px){.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand"><div class="logo">⚡</div>Sentinel-Go</div>
+  <div class="nav-links">
+    <a href="/" class="active">仪表盘</a>
+    <a href="/chat">聊天测试</a>
+  </div>
+</nav>
+<main>
+  <div class="stats">
+    <div class="stat a"><div class="stat-label">总 Tokens</div><div class="stat-val" id="s-total">—</div></div>
+    <div class="stat b"><div class="stat-label">可用</div><div class="stat-val" id="s-valid">—</div></div>
+    <div class="stat c"><div class="stat-label">失效</div><div class="stat-val" id="s-err">—</div></div>
+    <div class="stat d"><div class="stat-label">活跃会话</div><div class="stat-val" id="s-sess">—</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">服务状态</span>
+      <span class="badge badge-ok" id="status-badge">● 运行中</span>
+    </div>
+    <div class="card-body">
+      <div class="api-box">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span>🌐 API Base URL：<code id="base-url"></code></span>
+          <button class="btn btn-g" id="copy-btn" onclick="copyBase()" style="font-size:.75rem;padding:3px 12px;flex-shrink:0">复制</button>
+        </div>
+        <div style="margin-top:6px">📡 对话接口：<code>/v1/chat/completions</code></div>
+        <div style="margin-top:6px">🤖 模型列表：<code>/v1/models</code></div>
+        <div style="margin-top:10px;color:var(--muted);font-size:.78rem">将 API Base URL 填入 Cherry Studio / Open WebUI / NextChat 等客户端即可使用</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="card-title">上传 Tokens</span></div>
+    <div class="card-body">
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:.75rem;line-height:1.9">
+        支持以下两种格式（可混合，每行一条）：<br>
+        ① 直接粘贴 accessToken（JWT 格式）<br>
+        ② 打开 <a href="https://chatgpt.com/api/auth/session" target="_blank" style="color:var(--accent);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">chatgpt.com/api/auth/session</a>，全选复制整页内容粘贴（自动提取 accessToken）
+      </div>
+      <textarea id="token-input" placeholder="每行一个 Token，支持纯 JWT 或完整 JSON 混合粘贴…"></textarea>
+      <div class="btn-row">
+        <button class="btn btn-p" onclick="uploadTokens()">📤 上传</button>
+        <button class="btn btn-d" onclick="clearTokens()">🗑 清空所有</button>
+        <button class="btn btn-g" onclick="refresh()">↻ 刷新</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">失效 Tokens</span>
+      <button class="btn btn-g" style="font-size:.75rem;padding:4px 10px" onclick="loadErrors()">↻</button>
+    </div>
+    <div class="card-body">
+      <div class="err-list" id="err-list"><div class="empty">暂无失效 Token</div></div>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+const base = location.origin;
+document.getElementById('base-url').textContent = base;
+
+async function loadStats(){
+  try{
+    const d = await fetch('/health').then(r=>r.json());
+    document.getElementById('s-total').textContent = d.tokens_total??0;
+    document.getElementById('s-valid').textContent = d.tokens_valid??0;
+    document.getElementById('s-err').textContent = (d.tokens_total-d.tokens_valid)||0;
+    document.getElementById('s-sess').textContent = d.active_sessions??0;
+  }catch(e){
+    const b=document.getElementById('status-badge');
+    b.textContent='● 异常';b.className='badge badge-err';
+  }
+}
+
+async function uploadTokens(){
+  const text=document.getElementById('token-input').value.trim();
+  if(!text){toast('⚠️ 请输入 Token');return;}
+  const d=await fetch('/tokens/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tokens:text})}).then(r=>r.json());
+  if(d.status==='success'){
+    toast(`✅ 成功上传 ${d.added} 个，当前可用 ${d.tokens_count} 个`);
+    document.getElementById('token-input').value='';
+    loadStats();
+  }else toast('❌ 上传失败');
+}
+
+async function clearTokens(){
+  if(!confirm('确认清空所有 Tokens？'))return;
+  await fetch('/tokens/clear',{method:'POST'});
+  toast('✅ 已清空');loadStats();loadErrors();
+}
+
+async function loadErrors(){
+  const d=await fetch('/tokens/errors').then(r=>r.json());
+  const el=document.getElementById('err-list');
+  if(!d.error_tokens?.length){el.innerHTML='<div class="empty">暂无失效 Token</div>';return;}
+  el.innerHTML=d.error_tokens.map(t=>`<div class="err-item">${t.slice(0,50)}···${t.slice(-8)}</div>`).join('');
+}
+
+function refresh(){loadStats();loadErrors();}
+
+function copyBase(){
+  navigator.clipboard.writeText(base).then(()=>{
+    const btn=document.getElementById('copy-btn');
+    btn.textContent='✅ 已复制';
+    setTimeout(()=>{btn.textContent='复制'},2000);
+  });
+}
+
+function toast(msg){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),3200);
+}
+
+loadStats();loadErrors();
+setInterval(loadStats,30000);
+</script>
+</body>
+</html>
