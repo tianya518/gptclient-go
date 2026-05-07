@@ -64,16 +64,26 @@ select option{background:var(--s2)}
 .welcome h2{font-size:1.1rem;color:var(--text);font-weight:600}
 .welcome p{font-size:.85rem;max-width:340px;line-height:1.6}
 /* input bar */
-.input-bar{padding:1rem 1.5rem;border-top:1px solid var(--border);background:var(--s1);display:flex;gap:.75rem;align-items:flex-end}
-.input-wrap{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);display:flex;align-items:flex-end;padding:.5rem .75rem;transition:border-color .2s}
-.input-wrap:focus-within{border-color:var(--accent)}
+.input-bar{padding:.75rem 1.5rem 1rem;border-top:1px solid var(--border);background:var(--s1);display:flex;gap:.75rem;align-items:flex-end}
+.input-box{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);transition:border-color .2s;overflow:hidden}
+.input-box:focus-within{border-color:var(--accent)}
+.input-top{display:flex;align-items:flex-end;padding:.5rem .75rem}
+.input-toolbar{display:none;align-items:center;gap:4px;padding:.4rem .75rem .5rem;border-top:1px solid var(--border)}
+.input-toolbar.show{display:flex}
+.tb-btn{display:inline-flex;align-items:center;gap:3px;padding:3px 9px;border-radius:6px;border:none;background:none;color:var(--accent);font-size:.78rem;font-weight:500;cursor:pointer;transition:background .15s;font-family:inherit}
+.tb-btn:hover{background:rgba(124,111,255,.12)}
+.tb-btn select{background:none;border:none;color:var(--accent);font-size:.78rem;font-weight:500;cursor:pointer;outline:none;font-family:inherit;-webkit-appearance:none;padding-right:2px}
+.tb-btn select option{background:var(--s2);color:var(--text)}
+.tb-img-toggle{border-radius:6px;transition:all .2s}
+.tb-img-toggle.active{background:rgba(124,111,255,.18);color:var(--accent)}
+.tb-sep{width:1px;height:14px;background:var(--border);margin:0 2px}
 #user-input{flex:1;background:none;border:none;color:var(--text);font-family:inherit;font-size:.875rem;resize:none;outline:none;max-height:160px;min-height:24px;line-height:1.6;padding:0}
 #user-input::placeholder{color:var(--muted)}
 .send-btn{width:40px;height:40px;border-radius:10px;border:none;background:var(--accent);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;transition:all .2s}
 .send-btn:hover{filter:brightness(1.15)}
 .send-btn:disabled{opacity:.4;cursor:not-allowed}
-.hint{font-size:.72rem;color:var(--muted);padding:.3rem .5rem 0;text-align:right}
-.attach-btn{background:none;border:none;color:var(--muted);font-size:1.5rem;line-height:1;padding:0 8px;cursor:pointer;transition:.2s;align-self:flex-end;margin-bottom:4px}
+.hint{font-size:.72rem;color:var(--muted);padding:.25rem .5rem 0;text-align:right}
+.attach-btn{background:none;border:none;color:var(--muted);font-size:1.4rem;line-height:1;padding:0 6px;cursor:pointer;transition:.2s;align-self:flex-end;margin-bottom:2px}
 .attach-btn:hover{color:var(--text)}
 .preview-item{position:relative;width:60px;height:60px;border-radius:8px;overflow:hidden;border:1px solid var(--border);flex-shrink:0}
 .preview-item img{width:100%;height:100%;object-fit:cover}
@@ -141,12 +151,33 @@ select option{background:var(--s2)}
       </div>
     </div>
     <div class="input-bar">
-      <div style="flex:1;display:flex;flex-direction:column">
-        <div id="attachments-preview" style="display:flex;gap:8px;flex-wrap:wrap;overflow-y:auto;max-height:100px;margin-bottom:8px"></div>
-        <div class="input-wrap" style="align-items:flex-end;">
-          <button class="attach-btn" id="attach-btn" onclick="document.getElementById('file-input').click()">+</button>
-          <input type="file" id="file-input" accept="image/*" multiple style="display:none">
-          <textarea id="user-input" rows="1" placeholder="输入消息... (Shift+Enter 换行，Enter 发送)"></textarea>
+      <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+        <div id="attachments-preview" style="display:flex;gap:8px;flex-wrap:wrap;overflow-y:auto;max-height:90px"></div>
+        <div class="input-box">
+          <div class="input-top">
+            <button class="attach-btn" onclick="document.getElementById('file-input').click()">📎</button>
+            <input type="file" id="file-input" accept="image/*" multiple style="display:none">
+            <textarea id="user-input" rows="1" placeholder="输入消息... (Shift+Enter 换行，Enter 发送)"></textarea>
+          </div>
+          <!-- 底部工具栏：始终显示图片模式切换，激活后展开参数 -->
+          <div class="input-toolbar show" id="img-toolbar">
+            <button class="tb-btn tb-img-toggle" id="img-toggle" onclick="toggleImageMode()" title="图片生成模式">
+              🎨 <span id="img-toggle-label">图片</span>
+            </button>
+            <span id="img-params" style="display:none;align-items:center;gap:4px">
+              <div class="tb-sep"></div>
+              <span class="tb-btn">宽高比
+                <select id="size-select" title="宽高比">
+                  <option value="">自动</option>
+                  <option value="1:1">1:1</option>
+                  <option value="3:4">3:4</option>
+                  <option value="9:16">9:16</option>
+                  <option value="4:3">4:3</option>
+                  <option value="16:9">16:9</option>
+                </select>
+              </span>
+            </span>
+          </div>
         </div>
         <div class="hint">Shift+Enter 换行 · Enter 发送</div>
       </div>
@@ -159,6 +190,7 @@ select option{background:var(--s2)}
 let convID = '';
 let isStreaming = false;
 let attachedImages = [];
+let imageMode = false;
 
 // 图片上传预览
 document.getElementById('file-input').addEventListener('change', async (e) => {
@@ -235,10 +267,27 @@ document.getElementById('model-select').addEventListener('change', () => {
   localStorage.setItem('sg-model', document.getElementById('model-select').value);
 });
 
+function toggleImageMode() {
+  imageMode = !imageMode;
+  const btn = document.getElementById('img-toggle');
+  const params = document.getElementById('img-params');
+  const label = document.getElementById('img-toggle-label');
+  if (imageMode) {
+    btn.classList.add('active');
+    label.textContent = '图片 ✓';
+    params.style.display = 'inline-flex';
+    document.getElementById('user-input').placeholder = '描述要生成的图片... (Enter 发送)';
+  } else {
+    btn.classList.remove('active');
+    label.textContent = '图片';
+    params.style.display = 'none';
+    document.getElementById('user-input').placeholder = '输入消息... (Shift+Enter 换行，Enter 发送)';
+  }
+}
+
 async function loadModels() {
   try {
     const token = document.getElementById('api-token').value;
-    // 如果 token 为空也可以请求，让后端去兜底尝试使用 Token 池
     const d = await fetch('/v1/models', {headers: {'Authorization': `Bearer ${token}`}}).then(r => r.json());
     if (!d.data) return;
     const sel = document.getElementById('model-select');
@@ -292,7 +341,7 @@ async function sendMessage() {
     }
   }
 
-  const model = document.getElementById('model-select').value;
+  const model = imageMode ? 'dall-e-3' : document.getElementById('model-select').value;
   ta.value = ''; ta.style.height = 'auto';
 
   // 移除 welcome
@@ -329,6 +378,16 @@ async function sendMessage() {
   try {
     const body = { model, messages: [{ role: 'user', content: content }], stream: true };
     if (convID) body.conversation_id = convID;
+    if (imageMode) {
+      const size = document.getElementById('size-select').value;
+      if (size) body.size = size;
+    }
+
+    // 图片模式：显示生成中占位
+    if (imageMode) {
+      cursor.remove();
+      aiBubble.innerHTML = '<span style="color:var(--muted);font-size:.82rem">🎨 图片生成中，请稍候...</span>';
+    }
 
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
@@ -363,7 +422,7 @@ async function sendMessage() {
           if (chunk.error) {
             cursor.remove();
             aiBubble.textContent = '❌ ' + (chunk.error.message || '服务端错误');
-            fullText = '__error__'; // 防止被"无内容"覆盖
+            fullText = '__error__';
             return;
           }
           if (chunk.conversation_id && !convID) {
@@ -373,10 +432,19 @@ async function sendMessage() {
           const delta = chunk.choices?.[0]?.delta?.content;
           if (delta) {
             fullText += delta;
-            cursor.remove();
-            aiBubble.innerHTML = formatText(fullText);
-            aiBubble.appendChild(cursor);
-            scrollBottom();
+            if (imageMode) {
+              // 图片模式：只在收到 markdown 图片链接时才更新气泡，过滤中间文字
+              const imgMatch = fullText.match(/!\[[^\]]*\]\([^)]+\)/g);
+              if (imgMatch) {
+                aiBubble.innerHTML = imgMatch.map(md => formatText(md)).join('');
+                scrollBottom();
+              }
+            } else {
+              cursor.remove();
+              aiBubble.innerHTML = formatText(fullText);
+              aiBubble.appendChild(cursor);
+              scrollBottom();
+            }
           }
         } catch(e) {}
       }
@@ -385,7 +453,17 @@ async function sendMessage() {
     aiBubble.textContent = '❌ 请求失败：' + e.message;
   } finally {
     cursor.remove();
-    if (!fullText) aiBubble.textContent = '（无内容）';
+    // 图片模式：如果最终没有图片，显示纯文字内容（可能有错误信息）
+    if (imageMode) {
+      const imgMatch = fullText.match(/!\[[^\]]*\]\([^)]+\)/g);
+      if (!imgMatch && fullText && fullText !== '__error__') {
+        aiBubble.innerHTML = formatText(fullText);
+      } else if (!fullText) {
+        aiBubble.textContent = '（生成失败，无内容返回）';
+      }
+    } else if (!fullText) {
+      aiBubble.textContent = '（无内容）';
+    }
     isStreaming = false;
     document.getElementById('send-btn').disabled = false;
     scrollBottom();

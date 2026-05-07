@@ -14,11 +14,25 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ImageAspectRatio 图片宽高比
+type ImageAspectRatio string
+
+const (
+	ImageAspectAuto      ImageAspectRatio = ""      // 自动（默认）
+	ImageAspectSquare    ImageAspectRatio = "1:1"   // 方形
+	ImageAspectPortrait  ImageAspectRatio = "3:4"   // 竖版
+	ImageAspectStory     ImageAspectRatio = "9:16"  // 故事版
+	ImageAspectLandscape ImageAspectRatio = "4:3"   // 横版
+	ImageAspectWidescreen ImageAspectRatio = "16:9" // 宽屏
+)
+
 // ChatOptions 对话请求参数
 type ChatOptions struct {
 	Text           string
 	Images         []UploadedFile
 	ForcePictureV2 bool
+	// ImageAspect 仅在 ForcePictureV2=true 时生效，指定生成图片的宽高比
+	ImageAspect ImageAspectRatio
 }
 
 // Chat 发送一轮对话，返回完整结果（非流式）
@@ -49,11 +63,16 @@ func (c *Client) ChatStream(opts ChatOptions, handler StreamHandler) (*ChatResul
 	}
 	defer wsConn.Close()
 
+	promptText := opts.Text
+	if opts.ForcePictureV2 && opts.ImageAspect != ImageAspectAuto {
+		promptText += "\n\n将宽高比设为 " + string(opts.ImageAspect)
+	}
+
 	var parts []interface{}
 	for _, img := range opts.Images {
 		parts = append(parts, img.ToAssetPointerPart())
 	}
-	parts = append(parts, opts.Text)
+	parts = append(parts, promptText)
 
 	contentType := "text"
 	if len(opts.Images) > 0 {
@@ -89,8 +108,10 @@ func (c *Client) ChatStream(opts ChatOptions, handler StreamHandler) (*ChatResul
 	systemHints := []string{}
 	if opts.ForcePictureV2 {
 		systemHints = append(systemHints, "picture_v2")
+		meta := userMsgObj["metadata"].(map[string]interface{})
+		meta["system_hints"] = systemHints
 		// picture_v2 不能带 selected_sources，否则直接失败 (静默失败)
-		delete(userMsgObj["metadata"].(map[string]interface{}), "selected_sources")
+		delete(meta, "selected_sources")
 	}
 
 	body := map[string]interface{}{
@@ -330,24 +351,15 @@ func (c *Client) streamConversation(body interface{}, sentinelToken, proofToken,
 		currentEvent = ""
 	}
 
-	// 如果已经通过 SSE 直接拿到了回复，直接返回
-	if lastText != "" {
-		result.Text = lastText
-		return result, nil
-	}
-
-	// 图片生成场景：conversation-turn topic 上为流式思考（delta），conversation-update 上为快照与图片 asset_pointer
-	if !c.DisableAutoImage && result.ImageTaskID != "" && wsConn != nil && result.ConversationID != "" {
-		if handoffTopicID != "" {
-			c.logf("[image-ws] 订阅 %s 并同时监听 conversation-update...", handoffTopicID)
-			if err := c.subscribeWSImageCombined(wsConn, handoffTopicID, result.ConversationID, result, &lastText, handler); err != nil {
-				c.logf("[image-ws] ws 结束: %v", err)
-			}
+	// 图片生成场景：即使已有文本（如"正在处理图片"提示），也必须继续等待 WebSocket 图片
+	if !c.DisableAutoImage && result.ImageTaskID != "" && result.ConversationID != "" {
+		// 图片生成场景：使用 HTTP 轮询 stream_status，比 WebSocket 更可靠
+		c.logf("[image-poll] 开始轮询图片生成进度, conversation=%s", result.ConversationID)
+		if fileID, err := c.pollImageStreamStatus(result.ConversationID); err != nil {
+			c.logf("[image-poll] 轮询失败: %v", err)
 		} else {
-			c.logf("[image-ws] 监听 WebSocket conversation-update 获取生图进度...")
-			if err := c.subscribeWSConvUpdate(wsConn, result.ConversationID, result, handler); err != nil {
-				c.logf("[image-ws] ws 监听结束: %v", err)
-			}
+			result.ImageFileID = fileID
+			c.logf("[image-poll] 图片已就绪: %s", fileID)
 		}
 	} else if handoffTopicID != "" && wsConn != nil {
 		// 普通文字场景走 topic SSE 续流
@@ -357,6 +369,10 @@ func (c *Client) streamConversation(body interface{}, sentinelToken, proofToken,
 		}
 	}
 
+	// 图片生成成功后清除排队提示文字，只保留图片 URL
+	if result.ImageFileID != "" {
+		lastText = ""
+	}
 	result.Text = lastText
 	return result, nil
 }
@@ -477,15 +493,42 @@ func (c *Client) subscribeWSImageCombined(conn *websocket.Conn, turnTopicID, con
 	var useDeltaEncoding bool
 	var currentEvent string
 
-	conn.SetReadDeadline(time.Now().Add(180 * time.Second))
+	const totalTimeout = 10 * time.Minute
+	const pingInterval = 25 * time.Second
+	const readDeadlineExt = 60 * time.Second
+	deadline := time.Now().Add(totalTimeout)
+
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(readDeadlineExt))
+		return nil
+	})
+	stopPing := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			case <-stopPing:
+				return
+			}
+		}
+	}()
+	defer close(stopPing)
+
+	conn.SetReadDeadline(time.Now().Add(readDeadlineExt))
 	defer conn.SetReadDeadline(time.Time{})
 
 	for result.ImageFileID == "" {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("超过最大等待时间 %.0f 分钟，图片未返回", totalTimeout.Minutes())
+		}
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("ws read: %w", err)
 		}
-		conn.SetReadDeadline(time.Now().Add(180 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(readDeadlineExt))
 
 		frames := parseWSFrames(raw)
 		for _, frame := range frames {
@@ -606,16 +649,51 @@ func (c *Client) subscribeWSStream(conn *websocket.Conn, topicID string, result 
 }
 
 // subscribeWSConvUpdate 监听 WebSocket 的 conversation-update 消息（生图场景，无 turn topic 时）
+// 通过定期 Ping 心跳保活连接，最长等待 10 分钟。
 func (c *Client) subscribeWSConvUpdate(conn *websocket.Conn, conversationID string, result *ChatResult, handler StreamHandler) error {
-	conn.SetReadDeadline(time.Now().Add(180 * time.Second))
+	const totalTimeout = 10 * time.Minute
+	const pingInterval = 25 * time.Second
+	const readDeadlineExt = 60 * time.Second
+
+	deadline := time.Now().Add(totalTimeout)
+
+	// Pong handler：收到服务端 pong 后重置读 deadline
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(readDeadlineExt))
+		return nil
+	})
+
+	// 心跳 goroutine：每 25s 发一次 Ping
+	stopPing := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+					return
+				}
+			case <-stopPing:
+				return
+			}
+		}
+	}()
+	defer close(stopPing)
+
+	conn.SetReadDeadline(time.Now().Add(readDeadlineExt))
 	defer conn.SetReadDeadline(time.Time{})
 
 	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("超过最大等待时间 %.0f 分钟，图片未返回", totalTimeout.Minutes())
+		}
+
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("ws read: %w", err)
 		}
-		conn.SetReadDeadline(time.Now().Add(180 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(readDeadlineExt))
 
 		for _, frame := range parseWSFrames(raw) {
 			if fType, _ := frame["type"].(string); fType != "conversation-update" {
@@ -868,4 +946,110 @@ func (c *Client) processFullSSE(evt map[string]interface{}, result *ChatResult, 
 			*lastText = text
 		}
 	}
+}
+
+// pollImageStreamStatus 通过 HTTP 轮询等待图片生成完成，返回图片 file ID
+// 策略：先等 stream_status=COMPLETE（SSE 流结束），再继续轮询对话直到图片出现
+func (c *Client) pollImageStreamStatus(conversationID string) (string, error) {
+	const (
+		totalTimeout = 10 * time.Minute
+		pollInterval = 5 * time.Second
+	)
+	deadline := time.Now().Add(totalTimeout)
+
+	// 第一阶段：等待 SSE stream 结束（通常很快，几秒内）
+	streamDone := false
+	for !streamDone && time.Now().Before(deadline) {
+		status, err := c.fetchStreamStatus(conversationID)
+		if err != nil {
+			c.logf("[image-poll] stream_status 请求失败: %v，重试...", err)
+		} else {
+			c.logf("[image-poll] stream_status=%s", status)
+			if strings.EqualFold(status, "COMPLETE") {
+				streamDone = true
+				break
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// 第二阶段：轮询对话详情，等待图片文件 ID 出现（图片异步生成中）
+	for time.Now().Before(deadline) {
+		fileID, err := c.fetchConversationImageFileID(conversationID)
+		if err == nil && fileID != "" {
+			return fileID, nil
+		}
+		c.logf("[image-poll] 图片尚未就绪，等待中...")
+		time.Sleep(pollInterval)
+	}
+	return "", fmt.Errorf("等待图片超时（%v）", totalTimeout)
+}
+
+// fetchStreamStatus 查询对话的 stream_status
+func (c *Client) fetchStreamStatus(conversationID string) (string, error) {
+	apiPath := "/backend-api/conversation/" + conversationID + "/stream_status"
+	resp, err := c.httpClient.R().
+		SetHeaders(map[string]string{
+			"x-openai-target-path":  apiPath,
+			"x-openai-target-route": "/backend-api/conversation/{conversation_id}/stream_status",
+		}).
+		Get(apiPath)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(resp.Bytes(), &result); err != nil {
+		return "", err
+	}
+	return result.Status, nil
+}
+
+// fetchConversationImageFileID 获取对话中最新生成的图片文件 ID
+func (c *Client) fetchConversationImageFileID(conversationID string) (string, error) {
+	apiPath := "/backend-api/conversation/" + conversationID
+	resp, err := c.httpClient.R().
+		SetHeaders(map[string]string{
+			"x-openai-target-path":  apiPath,
+			"x-openai-target-route": "/backend-api/conversation/{conversation_id}",
+		}).
+		Get(apiPath)
+	if err != nil {
+		return "", fmt.Errorf("获取对话失败: %w", err)
+	}
+
+	var conv map[string]interface{}
+	if err := json.Unmarshal(resp.Bytes(), &conv); err != nil {
+		return "", fmt.Errorf("解析对话失败: %w", err)
+	}
+
+	// 遍历所有 mapping 节点，找 multimodal_text 中的 image_asset_pointer
+	mapping, _ := conv["mapping"].(map[string]interface{})
+	for _, nodeRaw := range mapping {
+		node, ok := nodeRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		msg, ok := node["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		content, _ := msg["content"].(map[string]interface{})
+		if ct, _ := content["content_type"].(string); ct != "multimodal_text" {
+			continue
+		}
+		parts, _ := content["parts"].([]interface{})
+		for _, p := range parts {
+			part, _ := p.(map[string]interface{})
+			if pct, _ := part["content_type"].(string); pct == "image_asset_pointer" {
+				ptr, _ := part["asset_pointer"].(string)
+				if strings.HasPrefix(ptr, "sediment://") {
+					fileID := strings.TrimPrefix(ptr, "sediment://")
+					return fileID, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("对话中未找到图片文件 ID")
 }

@@ -83,12 +83,14 @@ func (h *ChatHandler) Handle(c *gin.Context) {
 		entry.client.SetModel(req.Model)
 	}
 
-	forcePicV2 := strings.Contains(strings.ToLower(req.Model), "dall-e")
+	forcePicV2 := strings.Contains(strings.ToLower(req.Model), "dall-e") ||
+		strings.Contains(strings.ToLower(req.Model), "gpt-image")
 
 	opts := sentinel.ChatOptions{
 		Text:           inputMsg,
 		Images:         uploadedImages,
 		ForcePictureV2: forcePicV2,
+		ImageAspect:    sizeToAspect(req.Size),
 	}
 
 	chatID := "chatcmpl-" + sentinel.GenerateUUID()
@@ -349,5 +351,25 @@ func (h *ChatHandler) HandleImageProxy(c *gin.Context) {
 	err := entry.client.ProxyImageByFileID(fileID, convID, c.Writer, userAgent)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "Proxy image failed: %v", err)
+	}
+}
+
+// sizeToAspect 将 OpenAI 风格的 size 字符串转换为 ImageAspectRatio。
+// 支持 "1:1" / "3:4" / "9:16" / "4:3" / "16:9" 宽高比直写，
+// 以及兼容 OpenAI 像素格式 "256x256" / "1024x1024" / "1792x1024" / "1024x1792"。
+func sizeToAspect(size string) sentinel.ImageAspectRatio {
+	switch strings.TrimSpace(strings.ToLower(size)) {
+	case "1:1", "256x256", "512x512", "1024x1024":
+		return sentinel.ImageAspectSquare
+	case "3:4":
+		return sentinel.ImageAspectPortrait
+	case "9:16", "1024x1792":
+		return sentinel.ImageAspectStory
+	case "4:3":
+		return sentinel.ImageAspectLandscape
+	case "16:9", "1792x1024":
+		return sentinel.ImageAspectWidescreen
+	default:
+		return sentinel.ImageAspectAuto
 	}
 }

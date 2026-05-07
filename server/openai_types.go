@@ -17,6 +17,13 @@ type ChatCompletionRequest struct {
 	// 扩展字段：conversation_id，用于有状态多轮对话
 	// 首次请求无需传入，响应中会返回，下次请求带上即可续接上下文
 	ConversationID string `json:"conversation_id,omitempty"`
+
+	// 图片生成专用参数（仅当 model 含 dall-e / gpt-image 时生效）
+	// size 接受宽高比字符串：1:1 / 3:4 / 9:16 / 4:3 / 16:9
+	// 也兼容 OpenAI 格式：256x256 / 512x512 / 1024x1024 / 1792x1024 / 1024x1792
+	Size string `json:"size,omitempty"`
+	// n 生成张数（暂不支持 >1，预留字段）
+	N int `json:"n,omitempty"`
 }
 
 // Message OpenAI 消息格式
