@@ -88,6 +88,36 @@
 **扩展参数**：
 - 如果请求体中传入了 `conversation_id`，服务端会自动将其与内部的 Session 进行绑定，实现上下文追溯和长会话保持。
 
+### 1.3.1 图片生成（`dall-e-3`）
+
+本服务**不走** OpenAI 官方的 `POST /v1/images/generations`，而是走 **ChatGPT 网页同源**对话：后端 `model` 为 **`dall-e-3`**，并自动注入 `system_hints: ["picture_v2"]`（与网页「画图」一致）。
+
+| 字段 | 必填 | 说明 |
+| :--- | :--- | :--- |
+| `model` | 是（生图） | 推荐 **`dall-e-3`**（自动 `picture_v2`） |
+| `messages` | 是 | 至少一条 `user`，`content` 为画图描述（可附参考图 `image_url`） |
+| `stream` | 建议 `true` | 图片通过 SSE 的 `sentinel` 侧信道或 `artifact_markdown` 返回 |
+| `size` | 否 | 宽高比：`1:1` / `3:4` / `9:16` / `4:3` / `16:9`（或 `1024x1024` 等，会映射为比例） |
+| `artifact_delivery` | 否 | `url`（默认，代理链接）/ `base64` / `base64_chunked` |
+| `artifact_markdown` | 否 | `true` 时在正文末尾追加 `![Generated Image](...)` |
+| `conversation_id` | 否 | 多轮修图时带上轮次返回的 ID |
+
+**无需**单独传 `picture_v2`；`model` 含 `dall-e` 时会自动开启。
+
+请求示例：
+
+```json
+{
+  "model": "dall-e-3",
+  "messages": [{ "role": "user", "content": "画一只在沙发上的橘猫，卡通风格" }],
+  "stream": true,
+  "size": "1:1",
+  "artifact_delivery": "url"
+}
+```
+
+> **兼容别名**：若客户端仍传 `gpt-image-2` / `gpt-image-2-thinking`，服务端会**映射为 `dall-e-3`** 再请求 ChatGPT（响应里 `model` 仍回显你传入的名称）。这与 OpenAI API 独立的 `gpt-image-2` 图像端点不是同一路径。
+
 ### 1.4 返回值格式 (Stream = true)
 
 标准的 SSE (Server-Sent Events) 流式返回：
@@ -128,6 +158,8 @@ data: {"error":{"message":"get conduit token: 401 unauthorized","type":"server_e
 | 模型 ID | 说明 |
 | :--- | :--- |
 | `gpt-5-5-thinking` | GPT-5 Thinking 5.5，进阶推理（ChatGPT Plus 主推） |
+| `gpt-5-5` | GPT-5.5，标准对话 |
+| `dall-e-3` | DALL·E 3 生图（`picture_v2`，推荐） |
 | `gpt-5` | GPT-5 Instant 5.3，快速日常对话 |
 | `gpt-4o` | GPT-4o，多模态旗舰（兼容保留） |
 | `gpt-4o-mini` | GPT-4o mini，轻量快速（兼容保留） |

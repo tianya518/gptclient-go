@@ -107,18 +107,21 @@ func (h *ChatHandler) Handle(c *gin.Context) {
 		}
 	}
 
-	// 切换模型（如果请求指定了不同的模型）
-	if req.Model != "" && req.Model != entry.client.GetModel() {
-		entry.client.SetModel(req.Model)
+	resolved := sentinel.ResolveChatModel(req.Model)
+	apiModel := resolved.APIModel
+	if apiModel == "" {
+		apiModel = req.Model
 	}
 
-	forcePicV2 := strings.Contains(strings.ToLower(req.Model), "dall-e") ||
-		strings.Contains(strings.ToLower(req.Model), "gpt-image")
+	// 切换模型（生图别名会映射为 dall-e-3）
+	if resolved.ChatModel != "" && resolved.ChatModel != entry.client.GetModel() {
+		entry.client.SetModel(resolved.ChatModel)
+	}
 
 	opts := sentinel.ChatOptions{
 		Text:           inputMsg,
 		Images:         uploadedImages,
-		ForcePictureV2: forcePicV2,
+		ForcePictureV2: resolved.ForcePictureV2,
 		ImageAspect:    sizeToAspect(req.Size),
 	}
 
@@ -126,9 +129,9 @@ func (h *ChatHandler) Handle(c *gin.Context) {
 	createdAt := time.Now().Unix()
 
 	if req.Stream {
-		h.handleStream(c, entry, opts, req, req.ConversationID, chatID, req.Model, createdAt)
+		h.handleStream(c, entry, opts, req, req.ConversationID, chatID, apiModel, createdAt)
 	} else {
-		h.handleNonStream(c, entry, opts, req, req.ConversationID, chatID, req.Model, createdAt)
+		h.handleNonStream(c, entry, opts, req, req.ConversationID, chatID, apiModel, createdAt)
 	}
 }
 

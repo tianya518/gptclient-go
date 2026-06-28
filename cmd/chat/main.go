@@ -116,7 +116,7 @@ func startRepl(client *sentinel.Client) {
 				fmt.Printf("[ok] 模型已切换为: %s\n\n", parts[1])
 			} else {
 				fmt.Printf("[当前模型] %s\n", client.GetModel())
-				fmt.Print("  可选: gpt-5-5-thinking, gpt-4o, gpt-4o-mini, o4-mini-high\n\n")
+				fmt.Print("  可选: gpt-5-5-thinking, gpt-5-5, gpt-4o, gpt-4o-mini, o4-mini-high\n\n")
 			}
 
 		case input == "/temp":

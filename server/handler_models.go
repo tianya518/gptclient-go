@@ -11,6 +11,8 @@ import (
 var supportedModels = []Model{
 	// ── GPT 系列 ────────────────────────────────────────────────
 	{ID: "gpt-5-5-thinking", Object: "model", Created: 1700000000, OwnedBy: "openai"},
+	{ID: "gpt-5-5", Object: "model", Created: 1700000000, OwnedBy: "openai"},
+	{ID: "dall-e-3", Object: "model", Created: 1700000000, OwnedBy: "openai"},
 	{ID: "gpt-5", Object: "model", Created: 1700000000, OwnedBy: "openai"},
 	{ID: "gpt-4o", Object: "model", Created: 1700000000, OwnedBy: "openai"},
 	{ID: "gpt-4o-mini", Object: "model", Created: 1700000000, OwnedBy: "openai"},
