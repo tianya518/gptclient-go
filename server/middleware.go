@@ -27,11 +27,29 @@ func CORSMiddleware() gin.HandlerFunc {
 // 若未配置，则跳过鉴权（直接将 Bearer Token 视为 ChatGPT token）
 func AuthMiddleware(cfg *ServerConfig, pool *TokenPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 从请求头提取 Bearer Token（兼容 "Bearer eyJ..." 和 "Bearer" 无空格两种情况）
 		auth := c.GetHeader("Authorization")
-		// 先去掉 "Bearer "（有空格），再去掉 "Bearer"（无空格），最后 TrimSpace
-		token := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(auth, "Bearer "), "Bearer"))
-		token = cleanToken(token)
+		raw := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(auth, "Bearer "), "Bearer"))
+
+		// 本地 API 密码（如 kbnew-local）不是 JWT，必须在 cleanToken 之前匹配
+		if cfg.Authorization != "" && raw == cfg.Authorization {
+			chatgptToken, ok := pool.Pick()
+			if !ok {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, ErrorResponse{
+					Error: ErrorDetail{
+						Message: "Token pool is empty. Please upload tokens or provide one in the request.",
+						Type:    "server_error",
+						Code:    "no_token",
+					},
+				})
+				return
+			}
+			c.Set("chatgpt_token", chatgptToken)
+			c.Set("from_pool", true)
+			c.Next()
+			return
+		}
+
+		token := cleanToken(raw)
 
 		// 允许“免密模式”或“密码匹配模式”：
 		// - 如果传入的 token 就是我们配置的 AUTHORIZATION 密码

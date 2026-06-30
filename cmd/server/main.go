@@ -26,6 +26,7 @@ func setupLogging() {
 }
 
 func main() {
+	fmt.Fprintln(os.Stderr, "[sentinel] starting...")
 	setupLogging()
 
 	// 1. 读取配置
