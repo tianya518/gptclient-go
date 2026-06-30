@@ -2,13 +2,32 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"sentinel-go/server"
 )
 
+func setupLogging() {
+	logPath := strings.TrimSpace(os.Getenv("LOG_FILE"))
+	if logPath == "" {
+		return
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("[startup] open log file %s: %v", logPath, err)
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stdout, f))
+	log.Printf("[startup] logging to %s", logPath)
+}
+
 func main() {
+	setupLogging()
+
 	// 1. 读取配置
 	cfg := server.LoadConfig()
 
