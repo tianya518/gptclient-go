@@ -234,6 +234,7 @@ func (c *Client) dialChatWS() (*websocket.Conn, error) {
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
+		NetDialContext:   c.dialContext,
 	}
 	hdrs := http.Header{}
 	hdrs.Set("User-Agent", c.userAgent)
@@ -300,7 +301,18 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 		return nil, fmt.Errorf("conversation %d: %s", resp.StatusCode, truncateStr(string(b), 500))
 	}
 
-	result := &ChatResult{}
+	result := &ChatResult{
+		userReferenceFileIDs: make(map[string]bool),
+		pictureV2Path:        opts.ForcePictureV2,
+	}
+	if opts.ForcePictureV2 {
+		result.ExpectGeneratedImages = true
+	}
+	for _, f := range opts.Images {
+		if f.FileID != "" {
+			result.userReferenceFileIDs[f.FileID] = true
+		}
+	}
 	var lastText string
 	var useDeltaEncoding bool
 	var currentEvent string
@@ -338,7 +350,12 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 		}
 		result.ArtifactSignals = MergeSignals(result.ArtifactSignals, ExtractSignalsFromJSON(evt))
 		c.MergeApplyAndEmitArtifacts(result, opts)
+		if tid := findTurnExchangeID(evt); tid != "" {
+			handoffTopicID = "conversation-turn-" + tid
+			result.TurnExchangeID = tid
+		}
 
+		c.probeImageRouteFromSSE(payload, result, opts)
 		if strings.Contains(payload, "dalle") || strings.Contains(payload, `"tool"`) || strings.Contains(payload, "image") || strings.Contains(payload, "thought") || strings.Contains(payload, "reasoning_content") {
 			c.logf("[debug-sse] payload: %s", payload)
 		}
@@ -381,10 +398,11 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 		}
 
 		checkImageTaskID(evt, result)
+		c.MergeApplyAndEmitArtifacts(result, opts)
 		if useDeltaEncoding && currentEvent == "delta" {
-			c.processDeltaSSE(evt, result, &lastText, handler)
+			c.processDeltaSSE(evt, result, opts, &lastText, handler)
 		} else {
-			c.processFullSSE(evt, result, &lastText, handler)
+			c.processFullSSE(evt, result, opts, &lastText, handler)
 		}
 		currentEvent = ""
 	}
@@ -393,11 +411,35 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 	// 仅当 final 通道正文已完整时才跳过 WS catchup（避免未出 JSON 就 handoff）
 	result.bodyStreamFromSSE = result.assistantFinalText != ""
 
-	if handoffTopicID != "" && wsConn != nil {
+	if handoffTopicID == "" && result.TurnExchangeID != "" {
+		handoffTopicID = "conversation-turn-" + result.TurnExchangeID
+		c.logf("[handoff] turn topic 来自 TurnExchangeID: %s", handoffTopicID)
+	}
+
+	needImageHandoff := !c.DisableAutoImage && result.ExpectGeneratedImages && (opts.ForcePictureV2 || result.ImageTaskID != "")
+	sseCanSkipWS := needImageHandoff && result.CanSkipImageWSAfterSSE()
+
+	if needImageHandoff && wsConn != nil && !sseCanSkipWS {
+		// 长 SSE 期间 WS 无人读，服务端常会关连接；生图 handoff 前必须重连
+		_ = wsConn.Close()
+		var err error
+		wsConn, err = c.dialChatWS()
+		if err != nil {
+			return nil, fmt.Errorf("生图 handoff 重连 WS: %w", err)
+		}
+		c.logf("[handoff] 生图前已重连 WebSocket")
+	}
+
+	if sseCanSkipWS {
+		c.logf("[handoff] SSE 阶段已收齐出图 slots=%d file_ids=%v，跳过 WS 长等待", len(result.imageSlots), result.ImageFileIDs)
+		c.FinishImageGenWS(result, opts)
+	} else if handoffTopicID != "" && wsConn != nil {
 		c.logf("[handoff] 订阅 WebSocket topic: %s", handoffTopicID)
 		var err error
-		// 生图：WS 内继续收 delta / conversation-update，直到出现 image_asset_pointer（不轮询 conversation API）
-		if !c.DisableAutoImage && result.ExpectGeneratedImages && result.ImageTaskID != "" {
+		// picture_v2 / 生图轮次必须走 image WS：subscribeWSStream 不处理 conversation-update，会漏掉 async 出图
+		waitImageGen := !c.DisableAutoImage && result.ExpectGeneratedImages && (opts.ForcePictureV2 || result.ImageTaskID != "")
+		if waitImageGen {
+			c.logf("[handoff] 生图 WS 长等待 ForcePictureV2=%v ImageTaskID=%q topic=%s", opts.ForcePictureV2, result.ImageTaskID, handoffTopicID)
 			err = c.subscribeWSImageCombined(wsConn, handoffTopicID, result.ConversationID, result, opts, &lastText, handler)
 		} else {
 			err = c.subscribeWSStream(wsConn, handoffTopicID, result, opts, &lastText, handler)
@@ -413,8 +455,19 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 				c.logf("[image-ws] 无 DALL·E 产出（勿将用户参考图 file_id 当作生图结果）: %v", result.ImageFileIDs)
 			} else if result.imageAsyncTaskActive {
 				c.logf("[image-ws] async 生图任务已启动但 WS 未收到带 gen_id 的图片更新")
+			} else if opts.ForcePictureV2 {
+				c.logf("[image-ws] picture_v2 已开启但未收到 DALL·E 出图（请检查 WS conversation-update）")
 			}
 		}
+	} else if wsConn != nil && needImageHandoff && result.ConversationID != "" {
+		c.logf("[handoff] 仍无 turn topic（TurnExchangeID=%q），仅监听 conversation-update conv=%s", result.TurnExchangeID, result.ConversationID)
+		if err := c.subscribeWSConvUpdate(wsConn, result.ConversationID, result, opts, handler); err != nil {
+			// 无 turn topic 时 conv-update 常因 WS 已断而失败；若 async 仍在跑，给明确提示
+			if !result.HasDalleGeneratedOutput() {
+				return nil, fmt.Errorf("ws conv-update（无 turn topic，图片可能仍在服务端生成）: %w", err)
+			}
+		}
+		c.MergeApplyAndEmitArtifacts(result, opts)
 	}
 
 	// 生图成功且有 DALL·E 产出时清除排队提示文字
@@ -428,6 +481,88 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 		result.Text = lastText
 	}
 	return result, nil
+}
+
+// probeImageRouteFromSSE 诊断：区分 DALL·E async（应有 gen_id）与 Codex image_gen 容器路径（通常无 gen_id）。
+func (c *Client) probeImageRouteFromSSE(payload string, result *ChatResult, opts ChatOptions) {
+	if result == nil || (!opts.ForcePictureV2 && !result.ExpectGeneratedImages) {
+		return
+	}
+	lower := strings.ToLower(payload)
+	switch {
+	case strings.Contains(lower, "image_gen_task_id") || strings.Contains(lower, "ghostrider"):
+		if !result.sawImageGenTool {
+			c.logf("[image-route] dalle_async（预期 conversation-update + gen_id）model=%s ForcePictureV2=%v", c.model, opts.ForcePictureV2)
+		}
+		result.sawImageGenTool = true
+	case strings.Contains(lower, `"name": "image_gen"`) || strings.Contains(lower, `"name":"image_gen"`):
+		if !result.sawImageGenTool {
+			c.logf("[image-route] codex_image_gen 工具（built-in image_gen，通常无 dalle.gen_id）model=%s", c.model)
+		}
+		result.sawImageGenTool = true
+	case strings.Contains(lower, "container.exec") && strings.Contains(lower, "imagegen"):
+		c.logf("[image-route] codex_container 读取 imagegen skill（thinking+picture_v2 常见路径，非 classic DALL·E）model=%s", c.model)
+	case strings.Contains(lower, `"name": "dalle"`) || strings.Contains(lower, `"name":"dalle"`):
+		c.logf("[image-route] dalle 工具调用 model=%s", c.model)
+		result.sawImageGenTool = true
+	}
+}
+
+func findTurnExchangeID(v interface{}) string {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		if tid, ok := x["turn_exchange_id"].(string); ok && tid != "" {
+			return tid
+		}
+		if tid, ok := x["working_turn_id"].(string); ok && tid != "" {
+			return tid
+		}
+		for _, val := range x {
+			if id := findTurnExchangeID(val); id != "" {
+				return id
+			}
+		}
+	case []interface{}:
+		for _, item := range x {
+			if id := findTurnExchangeID(item); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func (c *Client) handleImageWSReadError(err error, result *ChatResult, opts ChatOptions, waitStart time.Time, tag string) (handled bool, retErr error) {
+	if err == nil || result == nil {
+		return false, nil
+	}
+	if result.HasDalleGeneratedOutput() {
+		c.FinishImageGenWS(result, opts)
+		c.logf("[image-ws] WS 断开但已有出图，正常结束 tag=%s err=%v", tag, err)
+		return true, nil
+	}
+	if done, finishErr := c.tryFinishImageGenWS(result, opts, waitStart, tag+"_ws_closed"); done {
+		c.logf("[image-ws] WS 关闭后 idle 收齐 tag=%s err=%v", tag, err)
+		return true, finishErr
+	}
+	return false, nil
+}
+
+func (result *ChatResult) noteTurnExchangeFromMessage(msg map[string]interface{}) {
+	if result == nil || msg == nil {
+		return
+	}
+	meta, ok := msg["metadata"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if tid, ok := meta["turn_exchange_id"].(string); ok && tid != "" {
+		result.TurnExchangeID = tid
+		return
+	}
+	if tid, ok := meta["working_turn_id"].(string); ok && tid != "" {
+		result.TurnExchangeID = tid
+	}
 }
 
 func (c *Client) noteConversationID(result *ChatResult, opts ChatOptions, evt map[string]interface{}) {
@@ -595,10 +730,7 @@ func (c *Client) FinishImageGenWS(result *ChatResult, opts ChatOptions) {
 func (c *Client) processConvUpdateMessage(msg map[string]interface{}, result *ChatResult, opts ChatOptions, handler StreamHandler, wsUpdateType string) {
 	msgID, _ := msg["id"].(string)
 	if result.ExpectGeneratedImages {
-		for _, img := range parseGeneratedImagesFromMessage(msg) {
-			c.logf("[image-ws] %s slot gen=%s file=%s rev_path", wsUpdateType, img.GenID, img.FileID)
-			c.noteGeneratedImageRevision(result, opts, img, wsUpdateType)
-		}
+		c.tryNoteGeneratedImagesFromMessage(msg, result, opts, wsUpdateType)
 		if meta, ok := msg["metadata"].(map[string]interface{}); ok {
 			if refs, ok := meta["content_references"].([]interface{}); ok {
 				for _, refRaw := range refs {
@@ -634,8 +766,12 @@ func (c *Client) processConvUpdateMessage(msg map[string]interface{}, result *Ch
 
 	if role == "tool" {
 		name, _ := author["name"].(string)
+		lowerName := strings.ToLower(name)
+		if strings.Contains(lowerName, "dalle") || strings.Contains(lowerName, "image_gen") {
+			result.sawImageGenTool = true
+		}
 		status, _ := msg["status"].(string)
-		isImageTool := strings.Contains(name, "dalle") || strings.Contains(name, "image_gen")
+		isImageTool := strings.Contains(lowerName, "dalle") || strings.Contains(lowerName, "image_gen")
 		if isImageTool && status == "in_progress" && !result.DalleStarted {
 			title := "正在生成图片，请稍候..."
 			for _, p := range parts {
@@ -679,7 +815,29 @@ func (c *Client) subscribeWSImageCombined(conn *websocket.Conn, turnTopicID, con
 	const readDeadlineExt = 60 * time.Second
 	deadline := time.Now().Add(totalTimeout)
 
+	imageGenReadWait := func() time.Duration {
+		if result == nil {
+			return readDeadlineExt
+		}
+		if result.imageGenConvAsyncStatusDone || result.imageGenAsyncCompleteSeen {
+			return 5 * time.Second
+		}
+		if result.imageGenTurnDone && result.HasDalleGeneratedOutput() && result.lastImageGenActivityAt > 0 {
+			since := time.Since(time.Unix(0, result.lastImageGenActivityAt))
+			need := 3 * time.Second
+			if since >= need {
+				return 200 * time.Millisecond
+			}
+			return need - since
+		}
+		return readDeadlineExt
+	}
+
 	conn.SetPongHandler(func(string) error {
+		// 已有图且 turn 结束：勿用 pong 无限续期 ReadMessage，否则无法 idle 退出
+		if result != nil && result.imageGenTurnDone && result.HasDalleGeneratedOutput() {
+			return nil
+		}
 		conn.SetReadDeadline(time.Now().Add(readDeadlineExt))
 		return nil
 	})
@@ -704,6 +862,7 @@ func (c *Client) subscribeWSImageCombined(conn *websocket.Conn, turnTopicID, con
 	waitStart := time.Now()
 	lastProgress := time.Now()
 	lastDiag := time.Now()
+	var turnDoneAt time.Time
 	c.logImageGenDiag(result, "ws_loop_start")
 	for {
 		if time.Now().After(deadline) {
@@ -714,9 +873,30 @@ func (c *Client) subscribeWSImageCombined(conn *websocket.Conn, turnTopicID, con
 			c.logf("[image-ws][async] 长期无 complete，已清除 stale pending（有图且 idle≥20s）")
 			c.logImageGenDiag(result, "stale_pending_cleared")
 		}
+		if result.imageGenTurnDone && turnDoneAt.IsZero() {
+			turnDoneAt = time.Now()
+		}
+		if !result.imageGenConvFetched && result.ConversationID != "" && !result.HasDalleGeneratedOutput() {
+			shouldFetch := false
+			if result.imageGenTurnDone && !turnDoneAt.IsZero() && time.Since(turnDoneAt) >= 5*time.Second {
+				shouldFetch = true
+			} else if time.Since(waitStart) >= 90*time.Second {
+				shouldFetch = true
+			}
+			if shouldFetch {
+				result.imageGenConvFetched = true
+				c.tryFetchGeneratedImagesFromConversation(result, opts)
+				c.MergeApplyAndEmitArtifacts(result, opts)
+			}
+		}
 		if done, err := c.tryFinishImageGenWS(result, opts, waitStart, "loop_top"); done {
 			return err
 		}
+		readWait := imageGenReadWait()
+		if readWait < 200*time.Millisecond {
+			readWait = 200 * time.Millisecond
+		}
+		conn.SetReadDeadline(time.Now().Add(readWait))
 		if time.Since(lastProgress) >= 15*time.Second {
 			c.logf("[image-ws] 等待生图中... 已等待 %ds | %s",
 				int(time.Since(waitStart).Seconds()), result.ImageGenExitBlockReason())
@@ -728,13 +908,12 @@ func (c *Client) subscribeWSImageCombined(conn *websocket.Conn, turnTopicID, con
 		}
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			if handled, herr := c.handleImageWSReadError(err, result, opts, waitStart, "image_combined"); handled {
+				return herr
+			}
 			return fmt.Errorf("ws read: %w", err)
 		}
-		readWait := readDeadlineExt
-		if result.imageGenConvAsyncStatusDone || result.imageGenAsyncCompleteSeen {
-			readWait = 5 * time.Second
-		}
-		conn.SetReadDeadline(time.Now().Add(readWait))
+		// read deadline 已在 loop_top 按 idle 退出策略设置
 
 		frames := parseWSFrames(raw)
 		c.logAndRecordWSFrames(raw, frames)
@@ -953,6 +1132,9 @@ func (c *Client) subscribeWSConvUpdate(conn *websocket.Conn, conversationID stri
 
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			if handled, herr := c.handleImageWSReadError(err, result, opts, waitStart, "conv_update"); handled {
+				return herr
+			}
 			return fmt.Errorf("ws read: %w", err)
 		}
 		readWait := readDeadlineExt
@@ -985,18 +1167,72 @@ func (c *Client) subscribeWSConvUpdate(conn *websocket.Conn, conversationID stri
 func (c *Client) processWSMessage(frame map[string]interface{}, result *ChatResult, opts ChatOptions, lastText *string, handler StreamHandler, useDeltaEncoding *bool, currentEvent *string) bool {
 	payload1, ok := frame["payload"].(map[string]interface{})
 	if !ok {
+		c.probeUnhandledWSImageFrame(frame, result, "no_payload")
 		return false
 	}
-	payload2, ok := payload1["payload"].(map[string]interface{})
-	if !ok {
+	if payload2, ok := payload1["payload"].(map[string]interface{}); ok {
+		if encoded, ok := payload2["encoded_item"].(string); ok && encoded != "" {
+			return c.processWSEncodedItem(encoded, result, opts, lastText, handler, useDeltaEncoding, currentEvent)
+		}
+		if msg, ok := payload2["message"].(map[string]interface{}); ok {
+			c.ingestWSMessageObject(msg, result, opts, handler, lastText, "ws_payload_message")
+			return false
+		}
+	}
+	if msg, ok := payload1["message"].(map[string]interface{}); ok {
+		c.ingestWSMessageObject(msg, result, opts, handler, lastText, "ws_direct_message")
 		return false
 	}
-	encoded, ok := payload2["encoded_item"].(string)
-	if !ok || encoded == "" {
-		return false
-	}
+	c.probeUnhandledWSImageFrame(frame, result, "no_encoded_item")
+	return false
+}
 
-	// encoded_item 是 SSE 格式文本，逐行解析
+func (c *Client) ingestWSMessageObject(msg map[string]interface{}, result *ChatResult, opts ChatOptions, handler StreamHandler, lastText *string, via string) {
+	if msg == nil || result == nil {
+		return
+	}
+	result.noteTurnExchangeFromMessage(msg)
+	if result.ExpectGeneratedImages {
+		c.tryNoteGeneratedImagesFromMessage(msg, result, opts, via)
+	}
+	c.processConvUpdateMessage(msg, result, opts, handler, via)
+	if author := getNestedString(msg, "author", "role"); author == "assistant" {
+		if text := getFirstStringPart(msg); text != "" {
+			channel, _ := msg["channel"].(string)
+			if channel == "final" {
+				c.emitBodyFull(result, lastText, text, "final", handler)
+			}
+		}
+	}
+}
+
+func (c *Client) probeUnhandledWSImageFrame(frame map[string]interface{}, result *ChatResult, reason string) {
+	if c == nil || frame == nil || result == nil || !result.ExpectGeneratedImages {
+		return
+	}
+	raw, _ := json.Marshal(frame)
+	s := string(raw)
+	if !strings.Contains(s, "image_asset_pointer") && !strings.Contains(s, "sediment://") {
+		return
+	}
+	fType, _ := frame["type"].(string)
+	topic, _ := frame["topic_id"].(string)
+	keys := []string{}
+	if p1, ok := frame["payload"].(map[string]interface{}); ok {
+		for k := range p1 {
+			keys = append(keys, "p1."+k)
+		}
+		if p2, ok := p1["payload"].(map[string]interface{}); ok {
+			for k := range p2 {
+				keys = append(keys, "p2."+k)
+			}
+		}
+	}
+	c.logf("[image-ws][probe] 帧含图但未解析 reason=%s type=%s topic=%s keys=%v slots=%d",
+		reason, fType, topic, keys, len(result.imageSlots))
+}
+
+func (c *Client) processWSEncodedItem(encoded string, result *ChatResult, opts ChatOptions, lastText *string, handler StreamHandler, useDeltaEncoding *bool, currentEvent *string) bool {
 	for _, line := range strings.Split(encoded, "\n") {
 		line = strings.TrimRight(line, "\r")
 
@@ -1037,9 +1273,9 @@ func (c *Client) processWSMessage(frame map[string]interface{}, result *ChatResu
 
 		checkImageTaskID(evt, result)
 		if *useDeltaEncoding && *currentEvent == "delta" {
-			c.processDeltaSSE(evt, result, lastText, handler)
+			c.processDeltaSSE(evt, result, opts, lastText, handler)
 		} else {
-			c.processFullSSE(evt, result, lastText, handler)
+			c.processFullSSE(evt, result, opts, lastText, handler)
 		}
 		*currentEvent = ""
 	}
@@ -1188,7 +1424,7 @@ func (c *Client) emitBodyFull(result *ChatResult, lastText *string, text, channe
 //  B) 简写 append：{"v":"text"}（省略 p/o，隐含对 parts/0 的追加）
 //  C) 消息对象 add：{"p":"","o":"add","v":{"message":{...}}}
 //  D) 完成 patch 数组：{"p":"","o":"patch","v":[...patches...]}
-func (c *Client) processDeltaSSE(evt map[string]interface{}, result *ChatResult, lastText *string, handler StreamHandler) {
+func (c *Client) processDeltaSSE(evt map[string]interface{}, result *ChatResult, opts ChatOptions, lastText *string, handler StreamHandler) {
 	pPath, _ := evt["p"].(string)
 	pOp, _ := evt["o"].(string)
 
@@ -1229,6 +1465,7 @@ func (c *Client) processDeltaSSE(evt map[string]interface{}, result *ChatResult,
 	if vMap, ok := v.(map[string]interface{}); ok {
 		if msgRaw, exists := vMap["message"]; exists {
 			if msg, ok := msgRaw.(map[string]interface{}); ok {
+				result.noteTurnExchangeFromMessage(msg)
 				author := getNestedString(msg, "author", "role")
 				channel, _ := msg["channel"].(string)
 				msgID, _ := msg["id"].(string)
@@ -1245,8 +1482,20 @@ func (c *Client) processDeltaSSE(evt map[string]interface{}, result *ChatResult,
 							}
 						}
 					}
+					if result.ExpectGeneratedImages {
+						c.tryNoteGeneratedImagesFromMessage(msg, result, opts, "ws_turn_delta")
+					}
 				}
 				if author == "tool" {
+					if name := getNestedString(msg, "author", "name"); name != "" {
+						lower := strings.ToLower(name)
+						if strings.Contains(lower, "dalle") || strings.Contains(lower, "image_gen") {
+							result.sawImageGenTool = true
+						}
+					}
+					if result.ExpectGeneratedImages {
+						c.tryNoteGeneratedImagesFromMessage(msg, result, opts, "sse_tool_add")
+					}
 					if meta, ok := msg["metadata"].(map[string]interface{}); ok {
 						if tid, ok := meta["image_gen_task_id"].(string); ok && tid != "" {
 							result.ImageTaskID = tid
@@ -1308,6 +1557,25 @@ func (c *Client) processDeltaSSE(evt map[string]interface{}, result *ChatResult,
 							c.emitBodyDelta(result, lastText, text, handler)
 						}
 					}
+					continue
+				}
+				if result.ExpectGeneratedImages && strings.HasPrefix(pp, "/message/content/parts/") &&
+					(po == "append" || po == "add" || po == "replace") {
+					if partMap, ok := patch["v"].(map[string]interface{}); ok {
+						if partMap["content_type"] == "image_asset_pointer" {
+							ap, _ := partMap["asset_pointer"].(string)
+							if fileID := extractFileID(ap); fileID != "" {
+								p := ParsedGeneratedImage{FileID: fileID}
+								if meta, ok := partMap["metadata"].(map[string]interface{}); ok {
+									if dalle, ok := meta["dalle"].(map[string]interface{}); ok {
+										p.GenID, _ = dalle["gen_id"].(string)
+									}
+								}
+								c.noteGeneratedImageRevision(result, opts, p, "ws_part_patch")
+							}
+							continue
+						}
+					}
 				}
 			}
 		}
@@ -1315,7 +1583,7 @@ func (c *Client) processDeltaSSE(evt map[string]interface{}, result *ChatResult,
 }
 
 // processFullSSE 处理非 delta 编码模式的 SSE 事件
-func (c *Client) processFullSSE(evt map[string]interface{}, result *ChatResult, lastText *string, handler StreamHandler) {
+func (c *Client) processFullSSE(evt map[string]interface{}, result *ChatResult, opts ChatOptions, lastText *string, handler StreamHandler) {
 	msgRaw, exists := evt["message"]
 	if !exists {
 		return
@@ -1340,6 +1608,9 @@ func (c *Client) processFullSSE(evt map[string]interface{}, result *ChatResult, 
 				}
 			}
 		}
+		if result.ExpectGeneratedImages {
+			c.tryNoteGeneratedImagesFromMessage(msg, result, opts, "ws_turn_full")
+		}
 	}
 
 	if meta, ok := msg["metadata"].(map[string]interface{}); ok {
@@ -1348,6 +1619,9 @@ func (c *Client) processFullSSE(evt map[string]interface{}, result *ChatResult, 
 		}
 		// 思考模型：tool 消息中的 reasoning_title 是每步思考标题
 		if author == "tool" {
+			if result.ExpectGeneratedImages {
+				c.tryNoteGeneratedImagesFromMessage(msg, result, opts, "sse_tool_full")
+			}
 			if title, ok := meta["reasoning_title"].(string); ok && title != "" {
 				execOutput := ""
 				if content, ok := msg["content"].(map[string]interface{}); ok {

@@ -22,7 +22,10 @@ type ChatCompletionRequest struct {
 	// 首次请求无需传入，响应中会返回，下次请求带上即可续接上下文
 	ConversationID string `json:"conversation_id,omitempty"`
 
-	// 图片生成专用参数（model 为 dall-e* 时自动启用 picture_v2；gpt-image* 兼容别名会映射为 dall-e-3）
+	// PictureV2 为 true 时注入 system_hints picture_v2 强制走 DALL·E 生图（可与任意 model 同用，便于续接 conversation_id）
+	PictureV2 bool `json:"picture_v2,omitempty"`
+
+	// 图片生成专用参数（model 为 dall-e* 时也会自动启用 picture_v2；gpt-image* 兼容别名会映射为 dall-e-3）
 	// size 接受宽高比字符串：1:1 / 3:4 / 9:16 / 4:3 / 16:9
 	// 也兼容 OpenAI 格式：256x256 / 512x512 / 1024x1024 / 1792x1024 / 1024x1792
 	Size string `json:"size,omitempty"`

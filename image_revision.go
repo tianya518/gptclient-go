@@ -1,7 +1,9 @@
 package sentinel
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -101,18 +103,14 @@ func parseGeneratedImagesFromMessage(msg map[string]interface{}) []ParsedGenerat
 	content, _ := msg["content"].(map[string]interface{})
 	parts, _ := content["parts"].([]interface{})
 	var out []ParsedGeneratedImage
-	for _, part := range parts {
-		partMap, ok := part.(map[string]interface{})
-		if !ok {
-			continue
-		}
+	appendPart := func(partMap map[string]interface{}) {
 		if partMap["content_type"] != "image_asset_pointer" {
-			continue
+			return
 		}
 		ap, _ := partMap["asset_pointer"].(string)
 		fileID := extractFileID(ap)
 		if fileID == "" {
-			continue
+			return
 		}
 		p := ParsedGeneratedImage{FileID: fileID, MessageID: msgID}
 		if w, ok := partMap["width"].(float64); ok {
@@ -132,16 +130,117 @@ func parseGeneratedImagesFromMessage(msg map[string]interface{}) []ParsedGenerat
 		}
 		out = append(out, p)
 	}
+	for _, part := range parts {
+		partMap, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		appendPart(partMap)
+	}
+	if ct, _ := content["content_type"].(string); ct == "image_asset_pointer" {
+		appendPart(content)
+	}
 	return out
+}
+
+func (result *ChatResult) isUserReferenceFile(fileID string) bool {
+	return result != nil && result.userReferenceFileIDs != nil && result.userReferenceFileIDs[fileID]
+}
+
+// allowPictureV2ImageWithoutGenID picture_v2 / image_gen 工具产出常无 dalle.gen_id，但仍为有效生图。
+func (result *ChatResult) allowPictureV2ImageWithoutGenID(fileID string) bool {
+	if fileID == "" || result == nil || result.isUserReferenceFile(fileID) {
+		return false
+	}
+	return result.pictureV2Path || result.sawImageGenTool || result.ImageTaskID != ""
+}
+
+func (c *Client) tryNoteGeneratedImagesFromMessage(msg map[string]interface{}, result *ChatResult, opts ChatOptions, via string) {
+	if c == nil || result == nil || !result.ExpectGeneratedImages {
+		return
+	}
+	role := getNestedString(msg, "author", "role")
+	imgs := parseGeneratedImagesFromMessage(msg)
+	if len(imgs) == 0 {
+		return
+	}
+	switch role {
+	case "assistant":
+		// picture_v2 / image_gen 常把图放在 assistant multimodal_text
+	case "tool":
+		// classic DALL·E 出图常在 tool 消息（含 dalle.gen_id）
+		accepted := false
+		for _, img := range imgs {
+			if img.GenID != "" || result.allowPictureV2ImageWithoutGenID(img.FileID) {
+				accepted = true
+				break
+			}
+		}
+		if !accepted {
+			return
+		}
+	default:
+		return
+	}
+	msgID, _ := msg["id"].(string)
+	for _, img := range imgs {
+		if img.MessageID == "" {
+			img.MessageID = msgID
+		}
+		if c != nil && img.GenID == "" {
+			c.logf("[image-parse] %s image file=%s gen_id=空 via=%s allow_no_gen=%v",
+				role, img.FileID, via, result.allowPictureV2ImageWithoutGenID(img.FileID))
+		} else if c != nil && img.GenID != "" {
+			c.logf("[image-parse] %s image file=%s gen_id=%s via=%s", role, img.FileID, img.GenID, via)
+		}
+		c.noteGeneratedImageRevision(result, opts, img, via)
+	}
+}
+
+func (c *Client) tryFetchGeneratedImagesFromConversation(result *ChatResult, opts ChatOptions) {
+	if c == nil || result == nil || result.ConversationID == "" || result.HasDalleGeneratedOutput() {
+		return
+	}
+	raw, err := c.FetchConversationRaw(result.ConversationID)
+	if err != nil {
+		c.logf("[image-ws][fallback] conversation fetch: %v", err)
+		return
+	}
+	var conv map[string]interface{}
+	if err := json.Unmarshal(raw, &conv); err != nil {
+		c.logf("[image-ws][fallback] conversation parse: %v", err)
+		return
+	}
+	mapping, _ := conv["mapping"].(map[string]interface{})
+	n := 0
+	for _, nodeRaw := range mapping {
+		node, ok := nodeRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		msg, ok := node["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		c.tryNoteGeneratedImagesFromMessage(msg, result, opts, "conv_fetch")
+		n++
+	}
+	c.logf("[image-ws][fallback] conversation fetch 扫描 %d 节点 slots=%d dalle=%v",
+		n, len(result.imageSlots), result.HasDalleGeneratedOutput())
 }
 
 func (c *Client) noteGeneratedImageRevision(result *ChatResult, opts ChatOptions, p ParsedGeneratedImage, wsUpdateType string) {
 	if p.FileID == "" || result == nil || !result.ExpectGeneratedImages {
 		return
 	}
-	// 仅有 gen_id 的才是 DALL·E 产出；用户上传的 referenced_image 无 gen_id，不能触发 idle 结束
+	// 经典 DALL·E 带 gen_id；picture_v2/image_gen 工具常无 gen_id，但仍为有效产出
 	if p.GenID == "" && wsUpdateType != "finalize" {
-		return
+		if !result.allowPictureV2ImageWithoutGenID(p.FileID) {
+			return
+		}
+		if c != nil {
+			c.logf("[image-ws][img] picture_v2 无 gen_id 仍接受 file=%s via=%s", p.FileID, wsUpdateType)
+		}
 	}
 	if !imageFileIDSeen(result.ImageFileIDs, p.FileID) {
 		result.ImageFileIDs = append(result.ImageFileIDs, p.FileID)
@@ -205,6 +304,9 @@ func (c *Client) noteGeneratedImageRevision(result *ChatResult, opts ChatOptions
 			}
 			if cfg.BuildImageURL != nil {
 				sup.URL = cfg.BuildImageURL(prevFileID)
+				if result.ConversationID != "" {
+					sup.URL = patchProxyConvID(sup.URL, result.ConversationID)
+				}
 			}
 			cfg.emit(sup)
 		}
@@ -236,6 +338,9 @@ func (c *Client) emitGeneratedImageEvent(cfg ArtifactStreamConfig, result *ChatR
 	}
 	if cfg.BuildImageURL != nil {
 		evBase.URL = cfg.BuildImageURL(p.FileID)
+	}
+	if result != nil && result.ConversationID != "" {
+		evBase.URL = patchProxyConvID(evBase.URL, result.ConversationID)
 	}
 
 	switch cfg.Delivery {
@@ -297,10 +402,58 @@ func (c *Client) FinalizeImageGenSlots(result *ChatResult, opts ChatOptions) {
 	}
 }
 
-// HasDalleGeneratedOutput 是否已有带 gen_id 的 WS 生图产出（非用户上传参考图）。
+// CanSkipImageWSAfterSSE HTTP SSE 结束后是否可跳过 WS 长等待（单图可跳过；多图需 async 完成或全部槽位已填满）。
+func (result *ChatResult) CanSkipImageWSAfterSSE() bool {
+	if !result.HasDalleGeneratedOutput() {
+		return false
+	}
+	if result.imageAsyncTaskPending > 0 || result.imageAsyncTaskActive {
+		return false
+	}
+	if result.imageGenAsyncCompleteSeen || result.imageGenConvAsyncStatusDone {
+		return true
+	}
+	n := len(result.imageSlots)
+	if n == 1 {
+		return true
+	}
+	if n >= 2 && result.allImageSlotsPopulated() {
+		return true
+	}
+	return false
+}
+
+func (result *ChatResult) allImageSlotsPopulated() bool {
+	if len(result.imageSlots) == 0 {
+		return false
+	}
+	for _, s := range result.imageSlots {
+		if s == nil || s.FileID == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// ImageGenDiagSummary 生图诊断摘要（供 server 日志）。
+func (result *ChatResult) ImageGenDiagSummary() string {
+	if result == nil {
+		return "slots=0"
+	}
+	return fmt.Sprintf("slots=%d saw_tool=%v picture_v2=%v has_dalle=%v",
+		len(result.imageSlots), result.sawImageGenTool, result.pictureV2Path, result.HasDalleGeneratedOutput())
+}
+
+// HasDalleGeneratedOutput 是否已有 WS 生图产出（含 picture_v2 无 gen_id 的 image_gen 出图）。
 func (result *ChatResult) HasDalleGeneratedOutput() bool {
 	for _, s := range result.imageSlots {
-		if s != nil && s.GenID != "" && s.FileID != "" {
+		if s == nil || s.FileID == "" {
+			continue
+		}
+		if s.GenID != "" {
+			return true
+		}
+		if result.allowPictureV2ImageWithoutGenID(s.FileID) {
 			return true
 		}
 	}
@@ -351,6 +504,10 @@ func (result *ChatResult) CanImageGenIdleExit() bool {
 	if result.imageGenAsyncCompleteSeen {
 		return since >= 2*time.Second
 	}
+	// turn topic 已 [DONE] 且已有图：单轮生图结束，不必再等 15s idle（否则 ReadMessage 被 pong 续期卡住）
+	if result.imageGenTurnDone && result.HasDalleGeneratedOutput() {
+		return since >= 2*time.Second
+	}
 	// 不用 turnDone：正文流 [DONE] 常早于生图 conversation-update 结束
 	return since >= ImageGenIdleDuration(result)
 }
@@ -381,4 +538,28 @@ func (result *ChatResult) RebuildImageFileIDsFromSlots() {
 	if len(result.ImageFileIDs) > 0 {
 		result.ImageFileID = result.ImageFileIDs[len(result.ImageFileIDs)-1]
 	}
+}
+
+// patchProxyConvID 修复 artifact URL 中 conv_id 为空（artifact 早于 conversation_id 回调时常见）。
+func patchProxyConvID(rawURL, convID string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	convID = strings.TrimSpace(convID)
+	if rawURL == "" || convID == "" {
+		return rawURL
+	}
+	if strings.Contains(rawURL, "conv_id=&") {
+		return strings.Replace(rawURL, "conv_id=&", "conv_id="+convID+"&", 1)
+	}
+	if strings.Contains(rawURL, "conv_id=") {
+		return rawURL
+	}
+	// 相对路径无 conv_id 时追加
+	if strings.Contains(rawURL, "/api/image/proxy?") && strings.Contains(rawURL, "file_id=") {
+		sep := "?"
+		if strings.Contains(rawURL, "?") {
+			sep = "&"
+		}
+		return rawURL + sep + "conv_id=" + convID
+	}
+	return rawURL
 }

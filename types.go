@@ -12,6 +12,7 @@ type Config struct {
 	Language     string // 可选：语言，默认 "zh-CN"
 	ImageDir     string // 可选：图片保存目录，默认 "images"
 	TempMode     bool   // 可选：临时模式（不保存对话历史）
+	ProxyURL     string // 可选：HTTP/SOCKS5 代理，如 socks5://127.0.0.1:10816
 }
 
 // ThinkStep 思考过程中的一个步骤（默认由 SSE thoughts 填充；可选 fetchTextdocs）
@@ -37,6 +38,7 @@ type ChatResult struct {
 	ImageFileID        string        // 首张图片文件 ID（兼容旧逻辑，等同于 ImageFileIDs[0]）
 	ImageFileIDs           []string // 所有生成图片的文件 ID 列表（多图场景）
 	ExpectGeneratedImages  bool     // 本轮为 DALL·E/picture_v2 生图（非上传文件识图里的 sediment 引用）
+	TurnExchangeID           string   // 本轮 turn_exchange_id（SSE/WS message.metadata）
 	ImagePath              string   // 已下载图片本地路径（如有）
 	DalleStarted       bool              // 标记是否已输出正在画图的提示
 	ArtifactSignals    []ArtifactSignal  // 流式/对话中观测到的产物信号（用于通用轮询判断）
@@ -52,6 +54,10 @@ type ChatResult struct {
 	imageGenConvAsyncStatusDone  bool // set-conversation-async-status（如 status=4）
 	imageGenConvStatusAt         int64 // 收到 conv async status=4 的时间（纳秒）
 	imageGenTurnDone             bool // turn topic WS 流已 [DONE]（仅诊断，不单独作为结束条件）
+	userReferenceFileIDs         map[string]bool // 用户上传参考图 file_id（picture_v2 时勿当作生图产出）
+	pictureV2Path                bool            // 请求级 picture_v2 / ForcePictureV2
+	sawImageGenTool              bool            // 本轮出现过 image_gen / dalle 工具
+	imageGenConvFetched          bool            // 已尝试过 conversation API 回退拉取
 }
 
 // SessionInfo 当前会话状态快照

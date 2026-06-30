@@ -121,7 +121,7 @@ func (h *ChatHandler) Handle(c *gin.Context) {
 	opts := sentinel.ChatOptions{
 		Text:           inputMsg,
 		Images:         uploadedImages,
-		ForcePictureV2: resolved.ForcePictureV2,
+		ForcePictureV2: resolved.ForcePictureV2 || req.PictureV2,
 		ImageAspect:    sizeToAspect(req.Size),
 	}
 
@@ -135,14 +135,18 @@ func (h *ChatHandler) Handle(c *gin.Context) {
 	}
 }
 
-func (h *ChatHandler) buildArtifactConfig(c *gin.Context, req ChatCompletionRequest, convID string, onEvent func(sentinel.StreamEvent)) sentinel.ArtifactStreamConfig {
+func (h *ChatHandler) buildArtifactConfig(c *gin.Context, entry *sessionEntry, req ChatCompletionRequest, convID string, onEvent func(sentinel.StreamEvent)) sentinel.ArtifactStreamConfig {
 	return sentinel.ArtifactStreamConfig{
 		Delivery:         req.ArtifactDelivery,
 		ChunkSize:        req.ArtifactBase64ChunkSize,
 		ImageRevisions:   req.ArtifactImageRevisions,
 		OnEvent:          onEvent,
 		BuildImageURL: func(fileID string) string {
-			rel := fmt.Sprintf("/api/image/proxy?conv_id=%s&file_id=%s", convID, fileID)
+			cid := convID
+			if cid == "" && entry != nil {
+				cid = entry.client.GetSessionInfo().ConversationID
+			}
+			rel := fmt.Sprintf("/api/image/proxy?conv_id=%s&file_id=%s", cid, fileID)
 			return buildAbsoluteURL(c, h.cfg, rel)
 		},
 		BuildSandboxURL: func(messageID, sandboxPath string) string {
@@ -155,7 +159,7 @@ func (h *ChatHandler) buildArtifactConfig(c *gin.Context, req ChatCompletionRequ
 
 // handleStream 流式响应
 func (h *ChatHandler) handleStream(c *gin.Context, entry *sessionEntry, opts sentinel.ChatOptions, req ChatCompletionRequest, reqConvID, chatID, model string, created int64) {
-	includeThinking := req.IncludeThinking
+	includeThinking := req.IncludeThinking || req.PictureV2
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -192,11 +196,11 @@ func (h *ChatHandler) handleStream(c *gin.Context, entry *sessionEntry, opts sen
 		}
 		registeredConvID = convID
 		h.session.Register(convID, entry)
-		opts.Artifacts = h.buildArtifactConfig(c, req, convID, writeSentinel)
+		opts.Artifacts = h.buildArtifactConfig(c, entry, req, convID, writeSentinel)
 	}
 	opts.OnConversationID = registerSessionForConv
 	registerSessionForConv(reqConvID)
-	opts.Artifacts = h.buildArtifactConfig(c, req, registeredConvID, writeSentinel)
+	opts.Artifacts = h.buildArtifactConfig(c, entry, req, registeredConvID, writeSentinel)
 
 	handler := func(delta string) {
 		if !includeThinking && len(delta) > 0 && delta[0] == '\x00' {
@@ -304,6 +308,10 @@ func (h *ChatHandler) handleStream(c *gin.Context, entry *sessionEntry, opts sen
 	// 兜底：沙箱等未在流中推送的产物
 	entry.client.EmitNewArtifacts(opts.Artifacts, result)
 
+	fmt.Printf("[chat-done] model=%s conv=%s expect_img=%v image_ids=%v %s text_len=%d streamed=%d\n",
+		model, result.ConversationID, result.ExpectGeneratedImages, result.ImageFileIDs,
+		result.ImageGenDiagSummary(), len(result.Text), streamedToClient.Len())
+
 	// 兼容：可选 markdown 链接（旧客户端）
 	if req.ArtifactMarkdown && result.ExpectGeneratedImages && len(result.ImageFileIDs) > 0 {
 		var imgContent strings.Builder
@@ -386,7 +394,7 @@ func (h *ChatHandler) handleNonStream(c *gin.Context, entry *sessionEntry, opts 
 		}
 		convForArt = convID
 		h.session.Register(convID, entry)
-		opts.Artifacts = h.buildArtifactConfig(c, req, convID, func(ev sentinel.StreamEvent) {
+		opts.Artifacts = h.buildArtifactConfig(c, entry, req, convID, func(ev sentinel.StreamEvent) {
 			sentinelEvents = append(sentinelEvents, ev)
 		})
 	}
@@ -394,7 +402,7 @@ func (h *ChatHandler) handleNonStream(c *gin.Context, entry *sessionEntry, opts 
 	if reqConvID != "" {
 		registerSessionForConv(reqConvID)
 	}
-	opts.Artifacts = h.buildArtifactConfig(c, req, convForArt, func(ev sentinel.StreamEvent) {
+	opts.Artifacts = h.buildArtifactConfig(c, entry, req, convForArt, func(ev sentinel.StreamEvent) {
 		sentinelEvents = append(sentinelEvents, ev)
 	})
 

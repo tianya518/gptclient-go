@@ -24,6 +24,9 @@ func main() {
 	} else {
 		log.Printf("  Authorization  : not set (direct token mode)")
 	}
+	if cfg.ProxyURL != "" {
+		log.Printf("  Proxy URL      : %s", cfg.ProxyURL)
+	}
 	log.Printf("============================================")
 
 	// 2. 初始化 Token 池

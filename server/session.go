@@ -68,6 +68,7 @@ func (sm *SessionManager) GetOrCreate(convID, token string) *sessionEntry {
 		Model:       sm.cfg.DefaultModel,
 		TempMode:    sm.cfg.TempMode,
 		ImageDir:    sm.cfg.ImageDir,
+		ProxyURL:    sm.cfg.ProxyURL,
 	})
 	// 启用自动图片下载阻塞，确保 Web UI 能够获取并渲染图片
 	client.SetDisableAutoImage(false)

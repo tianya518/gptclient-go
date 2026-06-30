@@ -30,6 +30,9 @@ type ServerConfig struct {
 	// 若为空，则从请求的 Host / X-Forwarded-Proto 头自动推断
 	BaseURL string
 
+	// 出站代理（访问 chatgpt.com），如 socks5://127.0.0.1:10816
+	ProxyURL string
+
 	// Session Token 自动刷新：在 AT 过期前多少秒提前用 ST 换 AT，默认 300
 	TokenRefreshAheadSec int
 }
@@ -45,6 +48,7 @@ func LoadConfig() ServerConfig {
 		TokensFile:        getEnv("TOKENS_FILE", "tokens.json"),
 		SessionTTLMinutes: getEnvInt("SESSION_TTL_MINUTES", 120),
 		BaseURL:              getEnv("BASE_URL", ""),
+		ProxyURL:             getEnv("PROXY_URL", getEnv("ALL_PROXY", "")),
 		TokenRefreshAheadSec: getEnvInt("TOKEN_REFRESH_AHEAD_SEC", 300),
 	}
 }

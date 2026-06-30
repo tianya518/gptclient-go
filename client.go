@@ -2,6 +2,7 @@ package sentinel
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"github.com/imroc/req/v3"
@@ -44,6 +45,8 @@ type Client struct {
 
 	// StreamRecorder 非空时记录全部 SSE 事件（供 stream-capture 分析）。
 	StreamRecorder *StreamRecorder
+
+	proxyURL string // 出站代理（HTTP + WebSocket）
 }
 
 // NewClient 创建新的 ChatGPT 客户端
@@ -69,6 +72,14 @@ func NewClient(cfg Config) *Client {
 		SetBaseURL("https://chatgpt.com").
 		SetCommonHeaders(c.commonHeaders()).
 		ImpersonateChrome()
+
+	if proxyURL := strings.TrimSpace(cfg.ProxyURL); proxyURL != "" {
+		c.proxyURL = proxyURL
+		httpC.SetProxyURL(proxyURL)
+		if c.Logf != nil {
+			c.Logf("[proxy] 出站代理: %s", proxyURL)
+		}
+	}
 
 	c.httpClient = httpC
 	return c

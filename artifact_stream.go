@@ -38,6 +38,9 @@ func guessMimeFromName(name string) string {
 }
 
 func (c *Client) emitImageGenPending(cfg ArtifactStreamConfig, title string) {
+	if strings.TrimSpace(title) == "" {
+		title = "正在生成图片…"
+	}
 	cfg.emit(StreamEvent{
 		Event: StreamEventArtifactPending,
 		Kind:  "generated_image",
