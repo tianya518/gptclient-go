@@ -1052,16 +1052,10 @@ func (c *Client) subscribeWSStream(conn *websocket.Conn, topicID string, result 
 					c.logf("[ws] reply catchups=%d", len(catchups))
 					for _, cu := range catchups {
 						if msg, ok := cu.(map[string]interface{}); ok {
-							d := c.processWSMessage(msg, result, opts, lastText, handler, &useDeltaEncoding, &currentEvent)
-							if d {
+							if c.processWSMessage(msg, result, opts, lastText, handler, &useDeltaEncoding, &currentEvent) {
 								done = true
 							}
 						}
-					}
-					// catchup 含完整流但无 [DONE] 标记时，正文已到齐即可结束
-					if !done && result.assistantFinalText != "" {
-						c.logf("[ws] catchups done, final len=%d", len([]rune(result.assistantFinalText)))
-						done = true
 					}
 				}
 				continue
@@ -1072,10 +1066,7 @@ func (c *Client) subscribeWSStream(conn *websocket.Conn, topicID string, result 
 				if frameTopic != topicID {
 					continue
 				}
-				d := c.processWSMessage(frame, result, opts, lastText, handler, &useDeltaEncoding, &currentEvent)
-				if d {
-					done = true
-				} else if result.assistantFinalText != "" {
+				if c.processWSMessage(frame, result, opts, lastText, handler, &useDeltaEncoding, &currentEvent) {
 					done = true
 				}
 			}
