@@ -97,3 +97,23 @@ func (h *TokensHandler) HandleErrors(c *gin.Context) {
 		"count":        len(errTokens),
 	})
 }
+
+// HandleCheck 主动检测每条凭证是否可用 GET /tokens/check
+// 含 Session 的会尝试换取 Access Token，仅 Access 的会探测存活；
+// 结果同步更新失效标记与刷新后的 Access Token。
+func (h *TokensHandler) HandleCheck(c *gin.Context) {
+	results := h.pool.CheckAll()
+	validCount := 0
+	for _, r := range results {
+		if r.Valid {
+			validCount++
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"total":   len(results),
+		"valid":   validCount,
+		"invalid": len(results) - validCount,
+		"results": results,
+	})
+}

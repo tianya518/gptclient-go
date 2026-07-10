@@ -89,7 +89,7 @@ func TestSaveLoadTokenJSON(t *testing.T) {
 	path := filepath.Join(dir, "tokens.json")
 	at := "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjE3MDAwMDAwMDB9.sig"
 	st := "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..abc.def.ghi"
-	tok := newStoredToken(at, st)
+	tok := newStoredToken(at, st, "")
 	if err := saveTokensToFile(path, []storedToken{tok}); err != nil {
 		t.Fatal(err)
 	}

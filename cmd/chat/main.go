@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	sentinel "sentinel-go"
+	sentinel "sentinel-go/sentinel"
 )
 
 var accessTokenRe = regexp.MustCompile(`"accessToken"\s*:\s*"([^"]+)"`)
@@ -29,6 +29,7 @@ func extractToken(raw string) string {
 type configFile struct {
 	BearerToken  string `json:"bearerToken"`
 	CookieString string `json:"cookieString"`
+	ProxyURL     string `json:"proxyURL"`
 }
 
 func main() {
@@ -58,6 +59,7 @@ func main() {
 	client := sentinel.NewClient(sentinel.Config{
 		BearerToken:  token,
 		CookieString: cf.CookieString,
+		ProxyURL:     cf.ProxyURL,
 		Model:        *model,
 		TempMode:     *temp,
 	})
@@ -116,7 +118,7 @@ func startRepl(client *sentinel.Client) {
 				fmt.Printf("[ok] 模型已切换为: %s\n\n", parts[1])
 			} else {
 				fmt.Printf("[当前模型] %s\n", client.GetModel())
-				fmt.Print("  可选: gpt-5-5-thinking, gpt-5-5, gpt-4o, gpt-4o-mini, o4-mini-high\n\n")
+				fmt.Print("  可选: gpt-5-5-thinking(高级/均衡), gpt-5-5(极速), gpt-5-4-thinking, gpt-5-3-instant, o3\n\n")
 			}
 
 		case input == "/temp":

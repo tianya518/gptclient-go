@@ -51,8 +51,14 @@ func main() {
 
 	// 2. 初始化 Token 池
 	pool := server.NewTokenPool(cfg.TokensFile, time.Duration(cfg.TokenRefreshAheadSec)*time.Second)
+	pool.SetOAuthConfig(cfg.OAuthTokenURL, cfg.OAuthClientID)
 	total, valid, _ := pool.Stats()
 	log.Printf("[startup] Token pool: total=%d, valid=%d", total, valid)
+
+	// 后台定时刷新（提前用 ST/RT 换 AT），间隔可配；<=0 关闭
+	if cfg.RefreshLoopSec > 0 {
+		pool.StartRefreshLoop(time.Duration(cfg.RefreshLoopSec) * time.Second)
+	}
 
 	// 3. 初始化 Session 管理器
 	session := server.NewSessionManager(&cfg)

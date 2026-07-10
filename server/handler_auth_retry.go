@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	sentinel "sentinel-go"
+	sentinel "sentinel-go/sentinel"
 )
 
 func isAuthError(err error) bool {

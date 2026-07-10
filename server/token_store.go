@@ -16,13 +16,15 @@ const tokenFileVersion = 1
 var (
 	accessTokenRegex  = regexp.MustCompile(`"accessToken"\s*:\s*"([^"]+)"`)
 	sessionTokenRegex = regexp.MustCompile(`"sessionToken"\s*:\s*"([^"]+)"`)
+	refreshTokenRegex = regexp.MustCompile(`"refresh_token"\s*:\s*"([^"]+)"`)
 )
 
-// storedToken 是 tokens 文件中的一条凭证（Access + Session）。
+// storedToken 是 tokens 文件中的一条凭证（Access + Session + Refresh）。
 type storedToken struct {
 	ID           string    `json:"id,omitempty"`
 	AccessToken  string    `json:"access_token,omitempty"`
 	SessionToken string    `json:"session_token,omitempty"`
+	RefreshToken string    `json:"refresh_token,omitempty"` // OAuth refresh token（auth.openai.com/oauth/token 换 AT）
 	ExpiresAt    time.Time `json:"expires_at,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
@@ -36,6 +38,9 @@ func (t *storedToken) dedupKey() string {
 	if t.SessionToken != "" {
 		return "st:" + t.SessionToken
 	}
+	if t.RefreshToken != "" {
+		return "rt:" + t.RefreshToken
+	}
 	if t.AccessToken != "" {
 		return "at:" + t.AccessToken
 	}
@@ -48,6 +53,9 @@ func (t *storedToken) assignID() {
 	}
 	src := t.SessionToken
 	if src == "" {
+		src = t.RefreshToken
+	}
+	if src == "" {
 		src = t.AccessToken
 	}
 	if src == "" {
@@ -57,10 +65,11 @@ func (t *storedToken) assignID() {
 	t.ID = fmt.Sprintf("%x", sum[:6])
 }
 
-func newStoredToken(accessToken, sessionToken string) storedToken {
+func newStoredToken(accessToken, sessionToken, refreshToken string) storedToken {
 	t := storedToken{
 		AccessToken:  accessToken,
 		SessionToken: sessionToken,
+		RefreshToken: refreshToken,
 		UpdatedAt:    time.Now(),
 	}
 	if accessToken != "" {
@@ -77,16 +86,16 @@ func parseCredentialInput(raw string) (storedToken, bool) {
 		return storedToken{}, false
 	}
 
-	// chatgpt.com/api/auth/session 整段 JSON（可含换行）
+	// chatgpt.com/api/auth/session 整段 JSON，或含 refresh_token 的账号 JSON（可含换行）
 	if strings.Contains(raw, "{") {
 		compact := strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\n", "")
 		compact = strings.TrimSpace(compact)
-		at, st := extractSessionJSON(compact)
-		if at == "" && st == "" {
-			at, st = extractSessionJSON(raw)
+		at, st, rt := extractSessionJSON(compact)
+		if at == "" && st == "" && rt == "" {
+			at, st, rt = extractSessionJSON(raw)
 		}
-		if at != "" || st != "" {
-			return newStoredToken(at, st), true
+		if at != "" || st != "" || rt != "" {
+			return newStoredToken(at, st, rt), true
 		}
 	}
 
@@ -97,7 +106,18 @@ func parseCredentialInput(raw string) (storedToken, bool) {
 		at := strings.TrimSpace(raw[:idx])
 		st := normalizeSessionToken(raw[idx+4:])
 		if isAccessToken(at) || isSessionToken(st) {
-			return newStoredToken(at, st), true
+			return newStoredToken(at, st, ""), true
+		}
+		return storedToken{}, false
+	}
+
+	// rt:<refresh_token> 显式声明 refresh token
+	if strings.HasPrefix(lower, "rt:") || strings.HasPrefix(lower, "refresh:") {
+		if i := strings.Index(raw, ":"); i >= 0 {
+			rt := strings.TrimSpace(raw[i+1:])
+			if rt != "" {
+				return newStoredToken("", "", rt), true
+			}
 		}
 		return storedToken{}, false
 	}
@@ -105,7 +125,7 @@ func parseCredentialInput(raw string) (storedToken, bool) {
 	if strings.HasPrefix(lower, "st:") {
 		st := normalizeSessionToken(raw[3:])
 		if isSessionToken(st) {
-			return newStoredToken("", st), true
+			return newStoredToken("", st, ""), true
 		}
 		return storedToken{}, false
 	}
@@ -113,17 +133,17 @@ func parseCredentialInput(raw string) (storedToken, bool) {
 		if i := strings.Index(raw, ":"); i >= 0 {
 			st := normalizeSessionToken(raw[i+1:])
 			if isSessionToken(st) {
-				return newStoredToken("", st), true
+				return newStoredToken("", st, ""), true
 			}
 		}
 		return storedToken{}, false
 	}
 
 	if isAccessToken(raw) {
-		return newStoredToken(raw, ""), true
+		return newStoredToken(raw, "", ""), true
 	}
 	if isSessionToken(raw) {
-		return newStoredToken("", normalizeSessionToken(raw)), true
+		return newStoredToken("", normalizeSessionToken(raw), ""), true
 	}
 
 	return storedToken{}, false
@@ -135,13 +155,13 @@ func splitUploadText(raw string) []string {
 	if raw == "" {
 		return nil
 	}
-	if strings.Contains(raw, "{") && strings.Contains(raw, "accessToken") {
+	if strings.Contains(raw, "{") && (strings.Contains(raw, "accessToken") || strings.Contains(raw, "refresh_token")) {
 		joined := strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\n", "")
 		joined = strings.TrimSpace(joined)
-		if at, st := extractSessionJSON(joined); at != "" || st != "" {
+		if at, st, rt := extractSessionJSON(joined); at != "" || st != "" || rt != "" {
 			return []string{joined}
 		}
-		if at, st := extractSessionJSON(raw); at != "" || st != "" {
+		if at, st, rt := extractSessionJSON(raw); at != "" || st != "" || rt != "" {
 			return []string{raw}
 		}
 	}
@@ -155,9 +175,9 @@ func splitUploadText(raw string) []string {
 	return lines
 }
 
-func extractSessionJSON(line string) (at, st string) {
+func extractSessionJSON(line string) (at, st, rt string) {
 	if !strings.Contains(line, "{") {
-		return "", ""
+		return "", "", ""
 	}
 	if m := accessTokenRegex.FindStringSubmatch(line); len(m) == 2 && isAccessToken(m[1]) {
 		at = m[1]
@@ -165,7 +185,10 @@ func extractSessionJSON(line string) (at, st string) {
 	if m := sessionTokenRegex.FindStringSubmatch(line); len(m) == 2 {
 		st = normalizeSessionToken(m[1])
 	}
-	return at, st
+	if m := refreshTokenRegex.FindStringSubmatch(line); len(m) == 2 {
+		rt = strings.TrimSpace(m[1])
+	}
+	return at, st, rt
 }
 
 func isSessionToken(s string) bool {

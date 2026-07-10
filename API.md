@@ -34,7 +34,7 @@
 
 ```json
 {
-  "model": "gpt-5-5-thinking",
+  "model": "gpt-5-5",
   "messages": [
     {
       "role": "system",
@@ -55,7 +55,7 @@
 
 ```json
 {
-  "model": "gpt-4o",
+  "model": "gpt-5-4",
   "messages": [
     {
       "role": "user",
@@ -81,7 +81,7 @@
 
 | 字段名 | 类型 | 必填 | 描述 |
 | :--- | :--- | :--- | :--- |
-| `model` | string | 否 | 指定使用的模型（见下方模型列表）。若不传，则默认使用服务端配置的 Default Model。 |
+| `model` | string | 否 | 指定使用的模型（见下方模型列表）。若不传，则默认使用服务端配置的 `DEFAULT_MODEL`。 |
 | `messages` | array | 是 | 历史对话数组，必须包含至少一条 `user` 角色的消息。 |
 | `stream` | boolean | 否 | 是否启用 SSE 流式输出。强烈推荐设置为 `true`。 |
 
@@ -153,19 +153,21 @@ data: {"error":{"message":"get conduit token: 401 unauthorized","type":"server_e
 - **Headers**:
   - `Authorization: Bearer <Token>` （免密池模式下可留空）
 
-### 当前支持模型
+### 当前支持模型（2026-07-09 MCP 抓包对齐）
 
-| 模型 ID | 说明 |
-| :--- | :--- |
-| `gpt-5-5-thinking` | GPT-5 Thinking 5.5，进阶推理（ChatGPT Plus 主推） |
-| `gpt-5-5` | GPT-5.5，标准对话 |
-| `dall-e-3` | DALL·E 3 生图（`picture_v2`，推荐） |
-| `gpt-5` | GPT-5 Instant 5.3，快速日常对话 |
-| `gpt-4o` | GPT-4o，多模态旗舰（兼容保留） |
-| `gpt-4o-mini` | GPT-4o mini，轻量快速（兼容保留） |
-| `o3` | o3 推理模型 |
-| `o4-mini` | o4-mini 轻量推理 |
-| `o4-mini-high` | o4-mini 高算力推理 |
+| 模型 ID（调用方传入） | 后端真实 model | thinking_effort | 说明 |
+| :--- | :--- | :--- | :--- |
+| `gpt-5-5-thinking`（**默认**） | `gpt-5-5-thinking` | `extended` | 官网"高级"，深度思考，支持多图并行 |
+| `gpt-5-5` | `gpt-5-5` | （不携带） | 官网"极速"，无思考，最快响应 |
+| `gpt-5-4` / `gpt-5-4-thinking` | `gpt-5-4-thinking` | `standard` | 官网 GPT-5.4，上一代 thinking 模型 |
+| `gpt-5-3` / `gpt-5-3-instant` | `gpt-5-3-instant` | （不携带） | 官网 GPT-5.3 极速，最轻量 |
+| `o3` | `o3` | （不携带） | 推理专用模型 |
+| `dall-e-3` / `gpt-image-2*` | `dall-e-3` | n/a | **图片生成专用**，自动开启 `picture_v2` |
+
+> **说明**：
+> - 调用方传入友好别名（如 `gpt-5-4`），`ResolveChatModel` 自动映射到后端 model 和 `thinking_effort`，无需手动指定。
+> - `thinking_effort: "extended"` 是触发多图并行生成的关键参数（官网"高级"模式默认值）。
+> - 极速/o3/gpt-5-3-instant 等官网原生不发送 `thinking_effort` 字段，服务端对齐此行为。
 
 ### 返回值示例
 
@@ -173,18 +175,12 @@ data: {"error":{"message":"get conduit token: 401 unauthorized","type":"server_e
 {
   "object": "list",
   "data": [
-    {
-      "id": "gpt-5-5-thinking",
-      "object": "model",
-      "created": 1714380000,
-      "owned_by": "openai"
-    },
-    {
-      "id": "gpt-4o",
-      "object": "model",
-      "created": 1714380000,
-      "owned_by": "openai"
-    }
+    {"id": "gpt-5-5-thinking", "object": "model", "created": 1751000000, "owned_by": "openai"},
+    {"id": "gpt-5-5",          "object": "model", "created": 1751000000, "owned_by": "openai"},
+    {"id": "gpt-5-4-thinking", "object": "model", "created": 1751000000, "owned_by": "openai"},
+    {"id": "gpt-5-3-instant",  "object": "model", "created": 1751000000, "owned_by": "openai"},
+    {"id": "o3",               "object": "model", "created": 1751000000, "owned_by": "openai"},
+    {"id": "dall-e-3",         "object": "model", "created": 1751000000, "owned_by": "openai"}
   ]
 }
 ```
@@ -254,9 +250,9 @@ data: {"error":{"message":"get conduit token: 401 unauthorized","type":"server_e
 
 ---
 
-## 6. 网页前端路由
+## 6. 根路径与静态资源
 
-Sentinel-Go 自身内置了轻量级的 Web UI 仪表盘和对话调试页面，可以直接在浏览器中访问。
+内置的网页前端（仪表盘 / 对话调试页）已移除。推荐使用 **Open WebUI** 等任意 OpenAI 兼容客户端，将 API 地址指向 `/v1` 即可。
 
-- `GET /` ：服务仪表盘，可查看服务运行状态、上传/清空 Token。
-- `GET /chat` ：自带的网页版多模态对话工具（支持免密池模式、切换模型、**Ctrl+V 粘贴图片上传**、实时流式文本对话等功能）。
+- `GET /` ：返回服务信息 JSON（服务名与可用端点列表）。
+- `GET /images/*` ：DALL·E 生成图片的静态资源目录。

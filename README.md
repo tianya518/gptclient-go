@@ -24,20 +24,22 @@
 
 ```
 sentinel-go/
-├── types.go            # 公开类型定义（Config、ChatResult、StreamHandler 等）
-├── client.go           # Client 核心结构体 & HTTP 客户端初始化
-├── auth.go             # Sentinel 三步认证（conduit + PoW + sentinel）
-├── pow.go              # SHA3-512 Proof-of-Work 算法实现
-├── chat.go             # 对话主流程（SSE + WebSocket 流式处理）
-├── image.go            # DALL-E 图片轮询、下载、HTTP 代理
-├── files.go            # 文件三步上传（Azure Blob + ChatGPT 注册）
-├── utils.go            # UUID、工具函数
+├── sentinel/           # 核心协议库（package sentinel）
+│   ├── types.go            # 公开类型定义（Config、ChatResult、StreamHandler 等）
+│   ├── client.go           # Client 核心结构体 & HTTP 客户端初始化
+│   ├── auth.go             # Sentinel 三步认证（conduit + PoW + sentinel）
+│   ├── pow.go              # SHA3-512 Proof-of-Work 算法实现
+│   ├── chat.go             # 对话主流程（SSE + WebSocket 流式处理）
+│   ├── image.go            # DALL-E 图片轮询、下载、HTTP 代理
+│   ├── files.go            # 文件三步上传（Azure Blob + ChatGPT 注册）
+│   └── utils.go            # UUID、工具函数
+├── server/             # OpenAI 兼容 HTTP 服务（package server）
+├── cmd/
+│   ├── chat/main.go        # CLI 交互式 REPL 入口
+│   └── server/main.go      # OpenAI 兼容 API 服务器入口
 ├── config.json         # 本地凭证配置（不要提交到 Git）
 ├── Dockerfile
-├── docker-compose.yml
-└── cmd/
-    ├── chat/main.go    # CLI 交互式 REPL 入口
-    └── server/main.go  # OpenAI 兼容 API 服务器入口
+└── docker-compose.yml
 ```
 
 ---
@@ -72,7 +74,7 @@ go run ./cmd/chat/
 go run ./cmd/chat/ "你好，介绍一下自己"
 
 # 指定模型
-go run ./cmd/chat/ -model gpt-4o-mini "帮我写一段 Go 代码"
+go run ./cmd/chat/ -model gpt-5-4 "帮我写一段 Go 代码"
 
 # 临时模式（不保存历史）
 go run ./cmd/chat/ -temp
@@ -83,7 +85,7 @@ go run ./cmd/chat/ -temp
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-config` | `config.json` | 配置文件路径 |
-| `-model` | `gpt-5-5-thinking` | 使用的模型名称 |
+| `-model` | `gpt-5-5` | 使用的模型名称 |
 | `-temp` | `false` | 开启临时模式（不保存对话历史） |
 
 ### REPL 内置命令
@@ -96,13 +98,13 @@ go run ./cmd/chat/ -temp
 | `/info` | 查看当前会话详情（conversation_id、model、轮次等） |
 | `/exit` / `/quit` | 退出程序 |
 
-**可选模型参考：**
+**当前可选模型：**
 
 ```
-gpt-5-5-thinking
-gpt-4o
-gpt-4o-mini
-o4-mini-high
+gpt-5-5
+gpt-5-4
+gpt-5-3
+o3
 ```
 
 ---
@@ -129,7 +131,7 @@ go run ./cmd/server/
 |------|----|
 | API Base URL | `http://localhost:5005` |
 | API Key | 留空（或填任意值，视鉴权配置而定） |
-| Model | `gpt-5-5-thinking`（或其他支持的模型） |
+| Model | `gpt-5-5`（或其他支持的模型） |
 
 ### Docker 部署
 
@@ -158,7 +160,7 @@ docker compose up -d
 |------|--------|------|
 | `PORT` | `5005` | 监听端口 |
 | `AUTHORIZATION` | `""` | API 鉴权 Key（留空则不校验，直接用传入 token 作为 ChatGPT token） |
-| `DEFAULT_MODEL` | `gpt-5-5-thinking` | 默认模型 |
+| `DEFAULT_MODEL` | `gpt-5-5` | 默认模型 |
 | `TEMP_MODE` | `false` | 临时模式（不保存对话历史） |
 | `IMAGE_DIR` | `images` | 图片保存目录 |
 | `TOKENS_FILE` | `tokens.json` | Token 持久化文件路径（JSON，含 access + session） |
@@ -205,7 +207,7 @@ docker compose up -d
 
 首次启动若仅有旧版 `tokens.txt`（按行 `st:` / JWT），会自动迁移到 `tokens.json`。
 
-配置 `TOKEN_REFRESH_AHEAD_SEC`（默认 300）可在 AT 过期前提前用 ST 换新；刷新后会写回 JSON。池模式请求若遇 401 会自动尝试刷新一次。
+配置 `TOKEN_REFRESH_AHEAD_SEC`（默认 86400）可在 AT 过期前提前用 ST/RT 换新；刷新后会写回 JSON。池模式请求若遇 401 会自动尝试刷新一次。
 
 ### 产物检测与流式抓包（stream-capture）
 
@@ -248,7 +250,7 @@ import sentinel "sentinel-go"
 
 client := sentinel.NewClient(sentinel.Config{
     BearerToken: "eyJ...",
-    Model:       "gpt-5-5-thinking",
+    Model:       "gpt-5-5",
 })
 
 // 非流式（等待完整回复）
@@ -268,7 +270,7 @@ result, _ = client.Chat(sentinel.ChatOptions{Text: "我叫什么名字？"}) // 
 client.ResetSession()
 
 // 切换模型
-client.SetModel("gpt-4o-mini")
+client.SetModel("gpt-5-4")
 
 // 禁用自动图片下载（由调用方异步处理）
 client.SetDisableAutoImage(true)
@@ -280,7 +282,7 @@ client.SetDisableAutoImage(true)
 |------|------|------|------|
 | `BearerToken` | string | ✅ | ChatGPT JWT Token |
 | `CookieString` | string | ❌ | 浏览器 Cookie（可选，增强兼容性） |
-| `Model` | string | ❌ | 模型名，默认 `gpt-5-5-thinking` |
+| `Model` | string | ❌ | 模型名，默认 `gpt-5-5` |
 | `DeviceID` | string | ❌ | 设备 ID，留空自动生成 UUID |
 | `BuildHash` | string | ❌ | 客户端构建 Hash |
 | `BuildNumber` | string | ❌ | 客户端构建号 |

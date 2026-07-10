@@ -15,7 +15,7 @@ type ServerConfig struct {
 	Authorization string
 
 	// ChatGPT 客户端默认参数
-	DefaultModel string // 默认模型，默认 gpt-5-5-thinking
+	DefaultModel string // 默认模型，默认 gpt-5-5
 	TempMode     bool   // 临时模式（不保存对话历史），默认 false
 	ImageDir     string // 图片保存目录，默认 images
 
@@ -33,8 +33,15 @@ type ServerConfig struct {
 	// 出站代理（访问 chatgpt.com），如 socks5://127.0.0.1:10816
 	ProxyURL string
 
-	// Session Token 自动刷新：在 AT 过期前多少秒提前用 ST 换 AT，默认 300
+	// Token 自动刷新：在 AT 过期前多少秒提前用 ST/RT 换 AT，默认 86400（1 天）
 	TokenRefreshAheadSec int
+
+	// 后台定时刷新循环间隔（秒），默认 1800（30 分钟）；<=0 关闭后台循环
+	RefreshLoopSec int
+
+	// refresh_token 换 AT 的 OAuth 端点与 client_id（留空用默认 auth.openai.com）
+	OAuthTokenURL string
+	OAuthClientID string
 }
 
 // LoadConfig 从环境变量加载配置
@@ -49,7 +56,10 @@ func LoadConfig() ServerConfig {
 		SessionTTLMinutes: getEnvInt("SESSION_TTL_MINUTES", 120),
 		BaseURL:              getEnv("BASE_URL", ""),
 		ProxyURL:             getEnv("PROXY_URL", getEnv("ALL_PROXY", "")),
-		TokenRefreshAheadSec: getEnvInt("TOKEN_REFRESH_AHEAD_SEC", 300),
+		TokenRefreshAheadSec: getEnvInt("TOKEN_REFRESH_AHEAD_SEC", 86400),
+		RefreshLoopSec:       getEnvInt("REFRESH_LOOP_SEC", 1800),
+		OAuthTokenURL:        getEnv("OAUTH_TOKEN_URL", ""),
+		OAuthClientID:        getEnv("OAUTH_CLIENT_ID", ""),
 	}
 }
 

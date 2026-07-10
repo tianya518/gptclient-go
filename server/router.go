@@ -36,6 +36,7 @@ func NewRouter(cfg *ServerConfig, pool *TokenPool, session *SessionManager) *gin
 	r.POST("/tokens/clear", tokens.HandleClear)
 	r.GET("/tokens/add/:token", tokens.HandleAddSingle)
 	r.GET("/tokens/errors", tokens.HandleErrors)
+	r.GET("/tokens/check", tokens.HandleCheck)
 
 	chat := NewChatHandler(cfg, pool, session)
 
@@ -52,8 +53,17 @@ func NewRouter(cfg *ServerConfig, pool *TokenPool, session *SessionManager) *gin
 	// ─── 管理前端与静态资源 ────────────────────────────────────────────────────────
 	r.GET("/api/image/proxy", chat.HandleImageProxy)
 	r.GET("/api/pdf/proxy", chat.HandlePDFProxy)
-	r.GET("/", HandleDashboard)
-	r.GET("/chat", HandleChatPage)
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"service": "sentinel-go",
+			"message": "OpenAI-compatible API server. Point an OpenAI client (e.g. Open WebUI) at /v1.",
+			"endpoints": gin.H{
+				"chat":   "/v1/chat/completions",
+				"models": "/v1/models",
+				"health": "/health",
+			},
+		})
+	})
 	r.Static("/images", cfg.ImageDir)
 
 	return r

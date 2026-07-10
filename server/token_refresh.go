@@ -7,13 +7,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 const sessionAuthURL = "https://chatgpt.com/api/auth/session"
 
+// OAuth refresh_token 换 access_token 的默认端点与 client_id（与 pandora/chatgpt2api 一致）。
+const (
+	defaultOAuthTokenURL = "https://auth.openai.com/oauth/token"
+	defaultOAuthClientID = "app_2SKx67EdpoN0G6j64rFvigXD"
+)
+
 var sessionHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var oauthHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 // RefreshATFromSession 用 Session Token 换取新的 Access Token（Web 作用域）。
 func RefreshATFromSession(sessionToken string) (accessToken string, expiresAt time.Time, err error) {
@@ -69,6 +77,58 @@ func RefreshATFromSession(sessionToken string) (accessToken string, expiresAt ti
 		expiresAt = parseJWTExp(out.AccessToken)
 	}
 	return out.AccessToken, expiresAt, nil
+}
+
+// RefreshATFromRefreshToken 用 OAuth refresh_token 换取新的 Access Token。
+// 返回新的 access_token、（可能轮换的）refresh_token 与过期时间。
+// oauthURL / clientID 为空时使用默认值。
+func RefreshATFromRefreshToken(refreshToken, oauthURL, clientID string) (accessToken, newRefreshToken string, expiresAt time.Time, err error) {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return "", "", time.Time{}, errors.New("refresh token is empty")
+	}
+	if oauthURL == "" {
+		oauthURL = defaultOAuthTokenURL
+	}
+	if clientID == "" {
+		clientID = defaultOAuthClientID
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+	form.Set("client_id", clientID)
+
+	req, err := http.NewRequest(http.MethodPost, oauthURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh http=%d body=%s", resp.StatusCode, truncateBody(string(data), 200))
+	}
+
+	var out struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", "", time.Time{}, fmt.Errorf("parse oauth response: %w", err)
+	}
+	if out.AccessToken == "" {
+		return "", "", time.Time{}, errors.New("oauth response missing access_token")
+	}
+	return out.AccessToken, strings.TrimSpace(out.RefreshToken), parseJWTExp(out.AccessToken), nil
 }
 
 // normalizeSessionToken 去掉常见前缀，得到裸 Session Token。

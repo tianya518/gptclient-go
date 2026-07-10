@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	sentinel "sentinel-go"
+	sentinel "sentinel-go/sentinel"
 )
 
 type captureCase struct {

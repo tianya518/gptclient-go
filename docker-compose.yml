@@ -11,7 +11,7 @@ services:
       # 调用 API 时的授权码（留空则直接用传入的 Bearer token 作为 ChatGPT token）
       AUTHORIZATION: ""
       # 默认模型
-      DEFAULT_MODEL: "gpt-5-5-thinking"
+      DEFAULT_MODEL: "gpt-5-5"
       # 临时模式（不保存历史）
       TEMP_MODE: "false"
       # Session 超时（分钟）

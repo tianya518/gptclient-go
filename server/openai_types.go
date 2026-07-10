@@ -3,7 +3,7 @@ package server
 import (
 	"time"
 
-	sentinel "sentinel-go"
+	sentinel "sentinel-go/sentinel"
 )
 
 // ─── 请求类型 ────────────────────────────────────────────────────────────────

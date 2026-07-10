@@ -33,7 +33,7 @@ RUN mkdir -p /app/images
 
 # 默认环境变量
 ENV PORT=5005
-ENV DEFAULT_MODEL=gpt-5-5-thinking
+ENV DEFAULT_MODEL=gpt-5-5
 ENV TEMP_MODE=false
 ENV IMAGE_DIR=/app/images
 ENV TOKENS_FILE=/app/tokens.json

@@ -8,14 +8,17 @@ import (
 	"time"
 )
 
-// TokenPool Token 池：持久化为 JSON；支持 AT、ST 或二者并存，ST 可自动续期 AT。
+// TokenPool Token 池：持久化为 JSON；支持 AT、ST、RT 或并存，ST/RT 可自动续期 AT。
 type TokenPool struct {
-	mu           sync.Mutex
-	entries      []storedToken
-	errorKeys    map[string]bool
-	roundIdx     int
-	tokensFile   string
-	refreshAhead time.Duration
+	mu            sync.Mutex
+	entries       []storedToken
+	errorKeys     map[string]bool
+	roundIdx      int
+	tokensFile    string
+	refreshAhead  time.Duration
+	oauthTokenURL string
+	oauthClientID string
+	stopRefresh   chan struct{}
 }
 
 // NewTokenPool 创建并从 JSON 文件加载 Token 池（兼容旧版行格式）。
@@ -24,12 +27,26 @@ func NewTokenPool(tokensFile string, refreshAhead time.Duration) *TokenPool {
 		refreshAhead = 5 * time.Minute
 	}
 	tp := &TokenPool{
-		errorKeys:    make(map[string]bool),
-		tokensFile:   tokensFile,
-		refreshAhead: refreshAhead,
+		errorKeys:     make(map[string]bool),
+		tokensFile:    tokensFile,
+		refreshAhead:  refreshAhead,
+		oauthTokenURL: defaultOAuthTokenURL,
+		oauthClientID: defaultOAuthClientID,
 	}
 	tp.loadFromFile()
 	return tp
+}
+
+// SetOAuthConfig 覆盖 refresh_token 换 AT 的端点与 client_id（留空则用默认）。
+func (tp *TokenPool) SetOAuthConfig(oauthURL, clientID string) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	if oauthURL != "" {
+		tp.oauthTokenURL = oauthURL
+	}
+	if clientID != "" {
+		tp.oauthClientID = clientID
+	}
 }
 
 func (tp *TokenPool) loadFromFile() {
@@ -69,27 +86,52 @@ func (tp *TokenPool) persistLocked() {
 	}
 }
 
+// fetchRefreshed 仅做网络换取，不修改池状态、不加锁；优先用 refresh_token，回退 session_token。
+// 返回新的 access_token、（可能轮换的）refresh_token、过期时间。
+func (tp *TokenPool) fetchRefreshed(e storedToken) (at, rt string, exp time.Time, err error) {
+	if e.RefreshToken != "" {
+		return RefreshATFromRefreshToken(e.RefreshToken, tp.oauthTokenURL, tp.oauthClientID)
+	}
+	if e.SessionToken != "" {
+		at, exp, err = RefreshATFromSession(e.SessionToken)
+		return at, "", exp, err
+	}
+	return "", "", time.Time{}, errors.New("no refreshable credential")
+}
+
+// canRefresh 判断该条目是否可通过 RT/ST 续期。
+func (e storedToken) canRefresh() bool {
+	return e.RefreshToken != "" || e.SessionToken != ""
+}
+
 func (tp *TokenPool) refreshEntry(e *storedToken) (string, error) {
-	if e.SessionToken == "" {
+	if !e.canRefresh() {
 		if e.AccessToken == "" {
 			return "", errors.New("no token")
 		}
 		return e.AccessToken, nil
 	}
-	at, exp, err := RefreshATFromSession(e.SessionToken)
+	at, rt, exp, err := tp.fetchRefreshed(*e)
 	if err != nil {
 		return "", err
 	}
+	via := "ST"
+	if e.RefreshToken != "" {
+		via = "RT"
+	}
 	e.AccessToken = at
 	e.ExpiresAt = exp
+	if rt != "" {
+		e.RefreshToken = rt
+	}
 	e.UpdatedAt = time.Now()
-	log.Printf("[token-pool] ST→AT 刷新成功, 过期时间 %s", exp.Format(time.RFC3339))
+	log.Printf("[token-pool] %s→AT 刷新成功, 过期时间 %s", via, exp.Format(time.RFC3339))
 	tp.persistLocked()
 	return at, nil
 }
 
 func (tp *TokenPool) ensureFresh(e *storedToken) (string, error) {
-	if e.SessionToken != "" {
+	if e.canRefresh() {
 		need := e.AccessToken == "" || e.ExpiresAt.IsZero() || time.Now().Add(tp.refreshAhead).After(e.ExpiresAt)
 		if need {
 			return tp.refreshEntry(e)
@@ -101,6 +143,10 @@ func (tp *TokenPool) ensureFresh(e *storedToken) (string, error) {
 	}
 	if e.ExpiresAt.IsZero() {
 		e.ExpiresAt = parseJWTExp(e.AccessToken)
+	}
+	// 纯 AT 条目无法续期：若已过期则报错，让 Pick 跳过并选下一条
+	if !e.ExpiresAt.IsZero() && time.Now().After(e.ExpiresAt) {
+		return "", errors.New("access token expired and no session/refresh token to renew")
 	}
 	return e.AccessToken, nil
 }
@@ -133,14 +179,14 @@ func (tp *TokenPool) Pick() (string, bool) {
 	return "", false
 }
 
-// TryRefreshAT 强制用 ST 刷新与 currentAT 对应的条目（401 重试用）。
+// TryRefreshAT 强制用 RT/ST 刷新与 currentAT 对应的条目（401 重试用）。
 func (tp *TokenPool) TryRefreshAT(currentAT string) (string, bool) {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 
 	for i := range tp.entries {
 		e := &tp.entries[i]
-		if e.SessionToken == "" {
+		if !e.canRefresh() {
 			continue
 		}
 		if e.AccessToken != "" && e.AccessToken != currentAT {
@@ -169,6 +215,9 @@ func mergeToken(existing *storedToken, incoming storedToken) {
 	if incoming.SessionToken != "" {
 		existing.SessionToken = incoming.SessionToken
 	}
+	if incoming.RefreshToken != "" {
+		existing.RefreshToken = incoming.RefreshToken
+	}
 	existing.UpdatedAt = time.Now()
 	existing.assignID()
 }
@@ -195,11 +244,17 @@ func (tp *TokenPool) Add(chunks ...string) int {
 			continue
 		}
 
-		// 同 session 或同 access 则更新，避免重复条目
+		// 同 session / refresh / access 则更新，避免重复条目
 		merged := false
 		for i := range tp.entries {
 			e := &tp.entries[i]
 			if incoming.SessionToken != "" && e.SessionToken == incoming.SessionToken {
+				mergeToken(e, incoming)
+				byKey[e.dedupKey()] = i
+				merged = true
+				break
+			}
+			if incoming.RefreshToken != "" && e.RefreshToken == incoming.RefreshToken {
 				mergeToken(e, incoming)
 				byKey[e.dedupKey()] = i
 				merged = true
@@ -279,4 +334,103 @@ func (tp *TokenPool) ErrorTokens() []string {
 		result = append(result, k)
 	}
 	return result
+}
+
+// StartRefreshLoop 启动后台定时刷新：每 interval 扫一遍池，对快过期的 RT/ST 条目提前续期。
+// 启动后立即先跑一轮。重复调用会先停掉旧循环。
+func (tp *TokenPool) StartRefreshLoop(interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Minute
+	}
+	tp.StopRefreshLoop()
+	stop := make(chan struct{})
+	tp.mu.Lock()
+	tp.stopRefresh = stop
+	tp.mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		tp.refreshDue()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				tp.refreshDue()
+			}
+		}
+	}()
+	log.Printf("[token-pool] 后台定时刷新已启动, 间隔 %s, 提前量 %s", interval, tp.refreshAhead)
+}
+
+// StopRefreshLoop 停止后台定时刷新循环。
+func (tp *TokenPool) StopRefreshLoop() {
+	tp.mu.Lock()
+	stop := tp.stopRefresh
+	tp.stopRefresh = nil
+	tp.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+}
+
+// refreshDue 扫描并刷新快过期的条目：采用「快照 → 无锁换取 → 回写」，避免网络 IO 期间长期持锁。
+func (tp *TokenPool) refreshDue() {
+	type job struct {
+		key string
+		tok storedToken
+	}
+	now := time.Now()
+
+	tp.mu.Lock()
+	var jobs []job
+	for _, e := range tp.entries {
+		if !e.canRefresh() || tp.errorKeys[e.dedupKey()] {
+			continue
+		}
+		need := e.AccessToken == "" || e.ExpiresAt.IsZero() || now.Add(tp.refreshAhead).After(e.ExpiresAt)
+		if need {
+			jobs = append(jobs, job{key: e.dedupKey(), tok: e})
+		}
+	}
+	tp.mu.Unlock()
+
+	if len(jobs) == 0 {
+		return
+	}
+
+	ok, failed := 0, 0
+	for _, j := range jobs {
+		at, rt, exp, err := tp.fetchRefreshed(j.tok)
+
+		tp.mu.Lock()
+		for i := range tp.entries {
+			if tp.entries[i].dedupKey() != j.key {
+				continue
+			}
+			if err != nil {
+				failed++
+				log.Printf("[token-pool] 定时刷新失败 key=%s: %v", j.key, err)
+			} else {
+				tp.entries[i].AccessToken = at
+				tp.entries[i].ExpiresAt = exp
+				if rt != "" {
+					tp.entries[i].RefreshToken = rt
+				}
+				tp.entries[i].UpdatedAt = time.Now()
+				delete(tp.errorKeys, j.key)
+				ok++
+			}
+			break
+		}
+		tp.mu.Unlock()
+	}
+
+	if ok > 0 {
+		tp.mu.Lock()
+		tp.persistLocked()
+		tp.mu.Unlock()
+	}
+	log.Printf("[token-pool] 定时刷新完成: 成功 %d, 失败 %d, 待刷新 %d", ok, failed, len(jobs))
 }

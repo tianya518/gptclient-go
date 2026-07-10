@@ -9,10 +9,19 @@ images/
 
 # Go 编译产物
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
 sentinel-go
+sentinel-server.exe
+
+# 运行日志 / 备份压缩包
+*.log
+*.rar
+
+# Open WebUI 运行时密钥
+.webui_secret_key
 
 # Go 测试缓存
 *.test

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	sentinel "sentinel-go"
+	sentinel "sentinel-go/sentinel"
 )
 
 // sessionEntry 单个会话条目
