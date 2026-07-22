@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/imroc/req/v3"
+	_ "golang.org/x/image/webp"
 )
 
 // UploadedFile 是三步上传后沉淀的"可 attach 给 messages"的元数据。
@@ -55,6 +56,10 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, fileName, mimeHint
 		if img, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
 			out.Width = img.Width
 			out.Height = img.Height
+		}
+		// 官网 ImageAssetPointer 强制要求 width/height；解码失败时给保守默认值
+		if out.Width <= 0 || out.Height <= 0 {
+			out.Width, out.Height = 1024, 1024
 		}
 	}
 
@@ -209,9 +214,10 @@ func (u *UploadedFile) ToAttachment() Attachment {
 type AssetPointerPart struct {
 	ContentType  string `json:"content_type,omitempty"` // "image_asset_pointer"
 	AssetPointer string `json:"asset_pointer"`
-	Width        int    `json:"width,omitempty"`
-	Height       int    `json:"height,omitempty"`
-	SizeBytes    int    `json:"size_bytes,omitempty"`
+	// width/height 不能 omitempty：官网 pydantic 校验缺失即 422
+	Width     int `json:"width"`
+	Height    int `json:"height"`
+	SizeBytes int `json:"size_bytes,omitempty"`
 }
 
 // ToAssetPointerPart 返回 multimodal_text.parts 里 insert 在 prompt 前的那一项。
@@ -228,10 +234,18 @@ func (u *UploadedFile) ToAssetPointerPart() AssetPointerPart {
 	}
 }
 
-// resolveMime 优先使用 mimeHint，否则嗅探文件内容。
+// resolveMime 优先嗅探真实内容；hint 与魔数冲突时（如速卖通 webp 标成 jpeg）以嗅探为准。
 func resolveMime(data []byte, mimeHint string) (mime, ext string) {
 	sniffed, sniffExt := sniffMime(data)
+	if isWebP(data) {
+		sniffed, sniffExt = "image/webp", ".webp"
+	}
 	hint := normalizeMime(mimeHint)
+	if sniffed != "" && sniffed != "application/octet-stream" &&
+		hint != "" && hint != sniffed &&
+		strings.HasPrefix(sniffed, "image/") {
+		return sniffed, sniffExt
+	}
 	if hint != "" && hint != "application/octet-stream" {
 		ext = extFromMime(hint)
 		if ext == "" {
@@ -240,6 +254,13 @@ func resolveMime(data []byte, mimeHint string) (mime, ext string) {
 		return hint, ext
 	}
 	return sniffed, sniffExt
+}
+
+func isWebP(data []byte) bool {
+	// RIFF....WEBP
+	return len(data) >= 12 &&
+		string(data[0:4]) == "RIFF" &&
+		string(data[8:12]) == "WEBP"
 }
 
 func normalizeMime(s string) string {

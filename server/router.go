@@ -48,6 +48,9 @@ func NewRouter(cfg *ServerConfig, pool *TokenPool, session *SessionManager) *gin
 		apiAuth.GET("/v1/models", HandleModels)
 		apiAuth.POST("/chat/completions", chat.Handle)
 		apiAuth.GET("/models", HandleModels)
+		// 删除会话（官网软删除：PATCH is_visible=false）
+		apiAuth.DELETE("/v1/conversations/:id", chat.HandleDeleteConversation)
+		apiAuth.DELETE("/conversations/:id", chat.HandleDeleteConversation)
 	}
 
 	// ─── 管理前端与静态资源 ────────────────────────────────────────────────────────
@@ -58,9 +61,10 @@ func NewRouter(cfg *ServerConfig, pool *TokenPool, session *SessionManager) *gin
 			"service": "sentinel-go",
 			"message": "OpenAI-compatible API server. Point an OpenAI client (e.g. Open WebUI) at /v1.",
 			"endpoints": gin.H{
-				"chat":   "/v1/chat/completions",
-				"models": "/v1/models",
-				"health": "/health",
+				"chat":               "/v1/chat/completions",
+				"models":             "/v1/models",
+				"delete_conversation": "DELETE /v1/conversations/:id",
+				"health":             "/health",
 			},
 		})
 	})

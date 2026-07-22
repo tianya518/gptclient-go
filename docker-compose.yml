@@ -6,18 +6,14 @@ services:
     ports:
       - "5005:5005"
     environment:
-      # 服务端口
       PORT: "5005"
-      # 调用 API 时的授权码（留空则直接用传入的 Bearer token 作为 ChatGPT token）
       AUTHORIZATION: ""
-      # 默认模型
-      DEFAULT_MODEL: "gpt-5-5"
-      # 临时模式（不保存历史）
+      DEFAULT_MODEL: "gpt-5-5-thinking"
       TEMP_MODE: "false"
-      # Session 超时（分钟）
       SESSION_TTL_MINUTES: "120"
+      TOKEN_REFRESH_AHEAD_SEC: "86400"
+      REFRESH_LOOP_SEC: "1800"
     volumes:
-      # 持久化 tokens 和图片
       - ./tokens.json:/app/tokens.json
       - ./images:/app/images
     healthcheck:
@@ -25,3 +21,24 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # Optional frontend: docker compose --profile webui up -d
+  open-webui:
+    profiles: ["webui"]
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    environment:
+      OPENAI_API_BASE_URL: "http://sentinel-go:5005/v1"
+      OPENAI_API_KEY: "sk-any"
+      WEBUI_AUTH: "true"
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      sentinel-go:
+        condition: service_healthy
+
+volumes:
+  open-webui-data:

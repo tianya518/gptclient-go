@@ -11,6 +11,7 @@ package sentinel
 //   - thoughts.go   ：thinking 步骤解析
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -113,6 +114,37 @@ func (c *Client) ChatStream(opts ChatOptions, handler StreamHandler) (*ChatResul
 	contentType := "text"
 	if hasImages {
 		contentType = "multimodal_text"
+	}
+
+	// 调试：打印实际上送的 multimodal parts（排查官网 422 schema）
+	if hasImages {
+		type partDiag struct {
+			Index int         `json:"index"`
+			Kind  string      `json:"kind"`
+			Value interface{} `json:"value"`
+		}
+		diags := make([]partDiag, 0, len(parts))
+		for i, p := range parts {
+			switch v := p.(type) {
+			case string:
+				preview := v
+				if len(preview) > 80 {
+					preview = preview[:80] + "..."
+				}
+				diags = append(diags, partDiag{Index: i, Kind: "string", Value: preview})
+			case AssetPointerPart:
+				diags = append(diags, partDiag{Index: i, Kind: "image_asset_pointer", Value: v})
+			default:
+				diags = append(diags, partDiag{Index: i, Kind: fmt.Sprintf("%T", p), Value: p})
+			}
+		}
+		if b, err := json.Marshal(diags); err == nil {
+			c.logf("[debug] multimodal parts=%s", string(b))
+		}
+		for _, f := range opts.Images {
+			c.logf("[debug] uploaded file id=%s use_case=%s mime=%s size=%d %dx%d",
+				f.FileID, f.UseCase, f.MimeType, f.FileSize, f.Width, f.Height)
+		}
 	}
 
 	attachments := []Attachment{}

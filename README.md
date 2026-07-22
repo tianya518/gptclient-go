@@ -137,18 +137,39 @@ REFRESH_LOOP_SEC=1800           # 每 30 分钟检查（默认）
 
 任何支持自定义 OpenAI API 地址的客户端均可直接对接。
 
-### Open WebUI（推荐）
+### Open WebUI（推荐，Windows 一键启动）
 
-1. 启动 sentinel-go 服务（`:5005`）
-2. 进入 Open WebUI → **Settings → Connections → OpenAI API**
+本机已预装 `open-webui` 时，**双击仓库根目录的 `start.bat`** 即可同时拉起后端 + 前端：
+
+| 脚本 | 作用 |
+|---|---|
+| `start.bat` | 启动 sentinel-go（:5005）+ Open WebUI（:3000），并打开浏览器 |
+| `stop.bat` | 停止两者 |
+| `scripts\start-webui.bat` | 仅启动前端（后端已在跑时用） |
+
+首次打开 [http://127.0.0.1:3000](http://127.0.0.1:3000) 时：
+
+1. 注册一个**本地管理员账号**（Open WebUI 自己的账号，和 ChatGPT 无关）
+2. 进入：**管理员面板 → 设置 → 连接 → OpenAI API**
 3. 填写：
 
 | 项 | 值 |
 |---|---|
-| API Base URL | `http://你的IP:5005/v1` |
-| API Key | 留空，或填你设置的 `AUTHORIZATION` 值 |
+| API Base URL | `http://127.0.0.1:5005/v1` |
+| API Key | `sk-any`（若设置了 `AUTHORIZATION` 则填该密码） |
 
-4. 刷新模型列表，选择 `gpt-5-5-thinking` 开始对话
+4. 保存后刷新模型列表，选择 `gpt-5-5-thinking` 开始对话
+
+> 未安装 Open WebUI 时先执行一次：`pip install open-webui`  
+> 数据目录：`data/open-webui/`（已 gitignore）  
+> 日志目录：`logs/`
+
+**有 Docker 时**也可：
+
+```bash
+docker compose --profile webui up -d
+# 前端 http://localhost:3000  后端 http://localhost:5005
+```
 
 ### Cherry Studio / NextChat / Chatbox
 
@@ -243,6 +264,7 @@ curl -s http://localhost:5005/v1/chat/completions \
 | `/health` | GET | 健康检查 |
 | `/v1/models` | GET | 模型列表 |
 | `/v1/chat/completions` | POST | 对话（OpenAI 兼容） |
+| `/v1/conversations/:id` | DELETE | 删除会话（官网软删除 `is_visible=false`） |
 | `/api/image/proxy` | GET | 生成图片代理（前端直接访问） |
 | `/api/pdf/proxy` | GET | AI 生成文件代理下载 |
 

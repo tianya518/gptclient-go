@@ -232,7 +232,36 @@ data: {"error":{"message":"get conduit token: 401 unauthorized","type":"server_e
 
 ---
 
-## 5. 健康检查 (Health Check)
+## 5. 删除会话 (Delete Conversation)
+
+对齐官网侧栏「删除」：软删除（隐藏），不是物理删除。
+
+- **URL**: `/v1/conversations/:id`（别名：`/conversations/:id`）
+- **Method**: `DELETE`
+- **鉴权**: 与 `/v1/chat/completions` 相同
+
+上游实际调用：
+
+```http
+PATCH /backend-api/conversation/{id}
+Content-Type: application/json
+
+{"is_visible": false}
+```
+
+### 返回值示例
+
+```json
+{
+  "success": true,
+  "conversation_id": "6a60526f-57ac-83ea-813b-3f931449a675",
+  "is_visible": false
+}
+```
+
+---
+
+## 6. 健康检查 (Health Check)
 
 - **URL**: `/health`
 - **Method**: `GET`
@@ -250,7 +279,7 @@ data: {"error":{"message":"get conduit token: 401 unauthorized","type":"server_e
 
 ---
 
-## 6. 根路径与静态资源
+## 7. 根路径与静态资源
 
 内置的网页前端（仪表盘 / 对话调试页）已移除。推荐使用 **Open WebUI** 等任意 OpenAI 兼容客户端，将 API 地址指向 `/v1` 即可。
 

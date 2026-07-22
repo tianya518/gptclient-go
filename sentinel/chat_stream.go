@@ -41,7 +41,12 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("conversation %d: %s", resp.StatusCode, truncateStr(string(b), 500))
+		// 422 时保留更长 body，便于看全 pydantic union 校验细节
+		limit := 500
+		if resp.StatusCode == 422 {
+			limit = 4000
+		}
+		return nil, fmt.Errorf("conversation %d: %s", resp.StatusCode, truncateStr(string(b), limit))
 	}
 
 	result := &ChatResult{

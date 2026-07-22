@@ -20,8 +20,10 @@ sentinel-server.exe
 *.log
 *.rar
 
-# Open WebUI 运行时密钥
+# Open WebUI 运行时密钥 / 本地数据 / 启动日志
 .webui_secret_key
+data/
+logs/
 
 # Go 测试缓存
 *.test
