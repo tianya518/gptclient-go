@@ -370,6 +370,13 @@ func (c *Client) subscribeWSStream(conn *websocket.Conn, topicID string, result 
 	for !done {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			// 正文已在 SSE/先前帧收齐时，WS 被代理或本机异常关闭不应再判整轮失败。
+			if result != nil && !result.ExpectGeneratedImages {
+				if strings.TrimSpace(result.assistantFinalText) != "" || result.bodyStreamFromSSE {
+					c.logf("[ws] read error after final body ready, treat as done: %v", err)
+					return nil
+				}
+			}
 			return fmt.Errorf("ws read: %w", err)
 		}
 

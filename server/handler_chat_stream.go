@@ -129,19 +129,30 @@ func (h *ChatHandler) handleStream(c *gin.Context, entry *sessionEntry, opts sen
 		fmt.Printf("[chat-stream-upstream] "+format+"\n", args...)
 	}, "result-text", result.Text)
 
-	// 流式增量未发出但 result.Text 已有正文（例如仅在 WS catchup 收齐）时补发
-	if streamedToClient.Len() == 0 && result.Text != "" {
-		if !firstSent {
+	// 流式增量未发出/未发全时，用 result.Text 补齐（WS 中断后 conversation 恢复常见）
+	streamed := streamedToClient.String()
+	if result.Text != "" {
+		var missing string
+		switch {
+		case streamed == "":
+			missing = result.Text
+		case strings.HasPrefix(result.Text, streamed) && len(result.Text) > len(streamed):
+			missing = result.Text[len(streamed):]
+		}
+		if missing != "" {
+			if !firstSent {
+				writeChunk(ChatCompletionChunk{
+					ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
+					Choices: []ChunkChoice{{Index: 0, Delta: Delta{Role: "assistant"}, FinishReason: nil}},
+				})
+				firstSent = true
+			}
 			writeChunk(ChatCompletionChunk{
 				ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
-				Choices: []ChunkChoice{{Index: 0, Delta: Delta{Role: "assistant"}, FinishReason: nil}},
+				Choices: []ChunkChoice{{Index: 0, Delta: Delta{Content: missing}, FinishReason: nil}},
 			})
-			firstSent = true
+			streamedToClient.WriteString(missing)
 		}
-		writeChunk(ChatCompletionChunk{
-			ID: chatID, Object: "chat.completion.chunk", Created: created, Model: model,
-			Choices: []ChunkChoice{{Index: 0, Delta: Delta{Content: result.Text}, FinishReason: nil}},
-		})
 	}
 
 	// 思考步骤详细内容（流结束后推送，仅 Web UI 请求 include_thinking 时）

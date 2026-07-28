@@ -193,6 +193,61 @@ func (c *Client) probeImageTurnViaConversation(result *ChatResult) bool {
 	}
 }
 
+// recoverFinalTextAfterStreamFailure 在 WS/流异常中断后尽量保住本轮结果。
+//
+// 典型场景：thinking + 附件上传后 stream_handoff 转 WS，本机 socks5/防火墙以 1006
+// 掐断连接，但 chatgpt.com 会话里最终 JSON/正文已写完（网页可见）。此时应：
+//  1) 若本地已有 final 正文 → 直接视为成功；
+//  2) 否则轮询 GET /conversation，用 extractFinalAssistantText 取回已结束答复。
+// 成功时返回 true，调用方不得再把原始 WS 错误抛给客户端。
+func (c *Client) recoverFinalTextAfterStreamFailure(result *ChatResult, lastText *string, handler StreamHandler, cause error) bool {
+	if c == nil || result == nil {
+		return false
+	}
+	if strings.TrimSpace(result.assistantFinalText) != "" {
+		c.logf("[handoff] 流失败但已有 final 正文（len=%d），忽略: %v", len(result.assistantFinalText), cause)
+		return true
+	}
+	if lastText != nil && strings.TrimSpace(*lastText) != "" && result.bodyStreamFromSSE {
+		result.assistantFinalText = *lastText
+		c.logf("[handoff] 流失败但 SSE 已有正文（len=%d），忽略: %v", len(*lastText), cause)
+		return true
+	}
+	if result.ConversationID == "" {
+		return false
+	}
+
+	c.logf("[handoff] 流失败，改从 conversation 拉取最终正文: %v conv=%s", cause, result.ConversationID)
+	const maxWait = 120 * time.Second
+	const interval = 3 * time.Second
+	deadline := time.Now().Add(maxWait)
+	for attempt := 1; ; attempt++ {
+		raw, err := c.FetchConversationRaw(result.ConversationID)
+		if err != nil {
+			c.logf("[handoff] conversation 恢复 #%d: %v", attempt, err)
+		} else {
+			var conv map[string]interface{}
+			if json.Unmarshal(raw, &conv) == nil {
+				if txt, mid := extractFinalAssistantText(conv); strings.TrimSpace(txt) != "" {
+					result.assistantFinalText = txt
+					result.asyncTextResolved = true
+					c.noteSandboxArtifactsFromText(txt, mid, result)
+					if lastText != nil {
+						c.emitBodyFull(result, lastText, txt, "final", handler)
+					}
+					c.logf("[handoff] conversation 已恢复最终正文 len=%d（#%d）", len(txt), attempt)
+					return true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			c.logf("[handoff] conversation 恢复超时（%d 次），无法取得最终正文", attempt)
+			return false
+		}
+		time.Sleep(interval)
+	}
+}
+
 // extractFinalAssistantText 取回本轮"已结束"的 assistant 最终正文及其消息 id。
 //
 // 关键：只认 end_turn=true（或 metadata.is_complete=true）的节点。thinking 轮次常先流式

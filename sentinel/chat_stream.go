@@ -199,7 +199,11 @@ func (c *Client) streamConversation(body interface{}, opts ChatOptions, sentinel
 		// 非生图轮次：正文可能仍需从 WS catchup 补全（subscribeWSStream 内部会在 bodyStreamFromSSE 时跳过）。
 		c.logf("[handoff] 订阅 WebSocket topic: %s", handoffTopicID)
 		if err := c.subscribeWSStream(wsConn, handoffTopicID, result, opts, &lastText, handler); err != nil {
-			return nil, fmt.Errorf("ws stream: %w", err)
+			// 代理/本机掐断 WS（1006 / unexpected EOF）时，官网会话往往已出完整正文。
+			// 先降级 GET /conversation 拉最终答复，避免把成功轮次误报成 API 流错误。
+			if !c.recoverFinalTextAfterStreamFailure(result, &lastText, handler, err) {
+				return nil, fmt.Errorf("ws stream: %w", err)
+			}
 		}
 		c.MergeApplyAndEmitArtifacts(result, opts)
 		// 安全网：若 WS 期间才识别出生图（batch_requests / 图像工具）但尚未收齐图片，
